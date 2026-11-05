@@ -9,11 +9,6 @@ class ScrapingRules:
 
     @staticmethod
     def is_high_risk_url(url_str: str) -> bool:
-        """
-        Evaluates whether a URL path contains high-risk punctuation 
-        (commas, ampersands, parentheses) known to trigger redirect loops 
-        on static mirror archives.
-        """
         try:
             parsed = URL(url_str)
             path = parsed.path
@@ -24,10 +19,6 @@ class ScrapingRules:
 
     @staticmethod
     def is_pagination_url(url_str: str) -> bool:
-        """
-        Detects if a URL represents a pagination page based on common 
-        query parameters or path conventions.
-        """
         try:
             parsed = URL(url_str)
             query_keys = parsed.query.keys()
@@ -76,14 +67,15 @@ class ScrapingRules:
         if has_spa_markers or (is_sparse_links and len(html_lower) > 0):
             profiles.add("headless")
 
-        # 5. Check for Virtualization / Infinite Scroll Structural Markers
+        # 5. Virtualized / Infinite Scroll Swarm Pairing
+        # Any target that requires headless browser rendering inherently requires interaction/scrolling to uncover dynamic content.
         scroll_indicators = [
             "virtual", "infinite", "masonry", "scroll-container", 
             "virtualized", "lazy-load", "data-page", "data-index", "observer"
         ]
         has_scroll_markers = any(marker in html_lower for marker in scroll_indicators)
         
-        if has_scroll_markers or ("headless" in profiles and soup and len(soup.find_all("script")) > 5):
+        if has_scroll_markers or "headless" in profiles:
             profiles.add("infinite_scroll")
 
         # 6. Check for Asset / File Repositories
