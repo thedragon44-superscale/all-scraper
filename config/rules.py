@@ -1,9 +1,10 @@
 from yarl import URL
+from bs4 import BeautifulSoup
 
 class ScrapingRules:
     """
     Centralized utility containing heuristic rules, risk filters, 
-    and architectural fingerprinting patterns for target websites.
+    and multi-dimensional architectural fingerprinting patterns for target websites.
     """
 
     @staticmethod
@@ -43,69 +44,67 @@ class ScrapingRules:
             return False
 
     @staticmethod
-    def fingerprint_architecture(sample_urls: list[str], raw_html: str = "") -> str:
+    def fingerprint_architecture(sample_urls: list[str], raw_html: str = "") -> list[str]:
         """
-        Analyzes a batch of discovered sample URLs and raw HTML content from Tier 1 to 
-        fingerprint the site's architectural profile across the full crawler suite:
-        - 'openapi': Developer portals / API specification endpoints
-        - 'sitemap': XML index sitemaps
-        - 'feed': RSS / Atom chronological feeds
-        - 'asset_index': Binary file mirrors and downloadable repositories
-        - 'flat_paged': Relies heavily on pagination or query lists
-        - 'hierarchical': Deep folder trees and subcategories
-        - 'headless': JavaScript-heavy SPAs and dynamic document viewers
-        - 'universal': Standard general-purpose fallback crawl
+        Analyzes sample URLs and raw HTML structure to dynamically select 
+        and combine multiple specialized crawler profiles without hardcoded domain references.
         """
+        profiles = set()
         html_lower = raw_html.lower()
+        soup = BeautifulSoup(raw_html, "lxml") if raw_html else None
 
-        # Check for JavaScript-Heavy SPAs / Dynamic Document Viewers (Headless Trigger)
+        # 1. Check for OpenAPI / Swagger specs
+        if any(any(kw in u.lower() for kw in ["swagger", "openapi", "api-docs"]) for u in sample_urls):
+            profiles.add("openapi")
+
+        # 2. Check for Sitemaps
+        if any(u.endswith("sitemap.xml") or "sitemap" in u.lower() for u in sample_urls):
+            profiles.add("sitemap")
+
+        # 3. Check for Feeds (RSS/Atom)
+        if any(any(kw in u.lower() for kw in ["/feed/", "rss.xml", "atom.xml", ".rss", ".atom"]) for u in sample_urls):
+            profiles.add("feed")
+
+        # 4. Check for Client-Side Rendering / SPA Footprints -> Headless
         spa_indicators = [
-            "__next_data__", 
-            "window.__nuxt__", 
-            "react-root", 
-            "app-root", 
-            "scribd", 
-            "hydrated",
-            "ng-app",
-            "pdf-viewer",
-            "document-viewer"
+            "__next_data__", "window.__nuxt__", "react-root", 
+            "app-root", "hydrated", "ng-app", "pdf-viewer", "document-viewer"
         ]
         has_spa_markers = any(marker in html_lower for marker in spa_indicators)
+        is_sparse_links = len(sample_urls) <= 3
         
-        if (len(sample_urls) <= 3 and has_spa_markers) or (len(sample_urls) == 0 and len(html_lower) > 0):
-            return "headless"
+        if has_spa_markers or (is_sparse_links and len(html_lower) > 0):
+            profiles.add("headless")
 
-        if not sample_urls:
-            return "universal"
+        # 5. Check for Virtualization / Infinite Scroll Structural Markers
+        scroll_indicators = [
+            "virtual", "infinite", "masonry", "scroll-container", 
+            "virtualized", "lazy-load", "data-page", "data-index", "observer"
+        ]
+        has_scroll_markers = any(marker in html_lower for marker in scroll_indicators)
+        
+        if has_scroll_markers or ("headless" in profiles and soup and len(soup.find_all("script")) > 5):
+            profiles.add("infinite_scroll")
 
-        # Check for OpenAPI / Swagger specs
-        if any(any(kw in u.lower() for kw in ["swagger", "openapi", "api-docs"]) for u in sample_urls):
-            return "openapi"
-
-        # Check for Sitemaps
-        if any(u.endswith("sitemap.xml") or "sitemap" in u.lower() for u in sample_urls):
-            return "sitemap"
-
-        # Check for Feeds (RSS/Atom)
-        if any(any(kw in u.lower() for kw in ["/feed/", "rss.xml", "atom.xml", ".rss", ".atom"]) for u in sample_urls):
-            return "feed"
-
-        # Check for Asset / File Repositories
+        # 6. Check for Asset / File Repositories
         asset_extensions = {".pdf", ".zip", ".tar", ".gz", ".rar", ".7z", ".png", ".jpg", ".jpeg"}
         asset_matches = sum(1 for u in sample_urls if URL(u).suffix.lower() in asset_extensions or "download" in u.lower())
-        if asset_matches / len(sample_urls) > 0.3:
-            return "asset_index"
+        if (sample_urls and asset_matches / len(sample_urls) > 0.3) or "pdf" in html_lower or "download" in html_lower:
+            profiles.add("asset_index")
 
-        # Check for Pagination
+        # 7. Check for Pagination
         pagination_count = sum(1 for u in sample_urls if ScrapingRules.is_pagination_url(u))
-        if pagination_count / len(sample_urls) > 0.3:
-            return "flat_paged"
+        if pagination_count / max(len(sample_urls), 1) > 0.3:
+            profiles.add("flat_paged")
 
-        # Check path depth complexity for hierarchy
+        # 8. Check path depth complexity for hierarchy
         depths = [len(URL(u).path.strip("/").split("/")) for u in sample_urls if URL(u).path]
         avg_depth = sum(depths) / len(depths) if depths else 0
-
         if avg_depth > 2:
-            return "hierarchical"
-        
-        return "universal"
+            profiles.add("hierarchical")
+
+        # Fallback if no specific profiles matched
+        if not profiles:
+            profiles.add("universal")
+
+        return list(profiles)

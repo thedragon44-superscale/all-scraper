@@ -19,7 +19,7 @@ from scraper import (
 class ScraperDispatcher:
     """
     Orchestration utility that probes a target URL, fingerprints its 
-    architecture using rules, and dynamically dispatches multi-crawler pipelines.
+    architecture into multiple profiles using rules, and dynamically dispatches a multi-crawler swarm.
     """
 
     def __init__(self, max_concurrent: int = 3):
@@ -41,18 +41,11 @@ class ScraperDispatcher:
             # Step 1: Perform lightweight probe of Tier 1 links and capture raw HTML
             sample_urls, raw_html = await self._fetch_tier_one_samples(sanitized_start)
             
-            # Step 2: Fingerprint architecture using rules utility with sample URLs and raw HTML
-            primary_profile = ScrapingRules.fingerprint_architecture(sample_urls, raw_html)
-            print(f"[*] Architectural fingerprint detected: '{primary_profile}'")
-            
-            # Build active profile execution list (e.g., primary crawler + companion asset sweep)
-            profiles = [primary_profile]
-            
-            # Companion logic: If scraping a content site, automatically bundle an asset check
-            if primary_profile in ["hierarchical", "flat_paged", "feed", "sitemap"] and "asset_index" not in profiles:
-                profiles.append("asset_index")
+            # Step 2: Fingerprint architecture into a multi-profile list without hardcoded domain logic
+            profiles = ScrapingRules.fingerprint_architecture(sample_urls, raw_html)
+            print(f"[*] Architectural fingerprints detected: {profiles}")
 
-        # Step 3: Execute multi-crawler dispatch pipeline
+        # Step 3: Execute multi-crawler dispatch swarm pipeline
         await self._dispatch_to_crawlers(profiles, sanitized_start, keyword_filter=keyword_filter)
 
     async def _fetch_tier_one_samples(self, start_url: str) -> tuple[list[str], str]:
@@ -83,8 +76,8 @@ class ScraperDispatcher:
         return sample_urls, raw_html
 
     async def _dispatch_to_crawlers(self, profiles: list[str], start_url: str, keyword_filter: str = None):
-        """Delegates execution to one or more specialized crawlers concurrently with optional keyword filtering."""
-        print(f"[*] Dispatching active crawler engines: {profiles}")
+        """Delegates execution to multiple specialized crawlers concurrently as a coordinated swarm."""
+        print(f"[*] Dispatching active crawler swarm: {profiles}")
         
         tasks = []
         for profile in profiles:
@@ -122,7 +115,7 @@ class ScraperDispatcher:
                 else:
                     tasks.append(asyncio.to_thread(crawler.crawl, start_url))
 
-        # Run multiple crawlers concurrently
+        # Run all selected crawlers concurrently as a swarm
         await asyncio.gather(*tasks)
         print("[*] All dispatched crawler pipelines completed execution.")
 
