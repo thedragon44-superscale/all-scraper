@@ -38,11 +38,11 @@ class ScraperDispatcher:
             print(f"[*] User override active. Forcing profile: '{forced_profile}'")
             profiles = [forced_profile]
         else:
-            # Step 1: Perform lightweight probe of Tier 1 links
-            sample_urls = await self._fetch_tier_one_samples(sanitized_start)
+            # Step 1: Perform lightweight probe of Tier 1 links and capture raw HTML
+            sample_urls, raw_html = await self._fetch_tier_one_samples(sanitized_start)
             
-            # Step 2: Fingerprint architecture using rules utility
-            primary_profile = ScrapingRules.fingerprint_architecture(sample_urls)
+            # Step 2: Fingerprint architecture using rules utility with sample URLs and raw HTML
+            primary_profile = ScrapingRules.fingerprint_architecture(sample_urls, raw_html)
             print(f"[*] Architectural fingerprint detected: '{primary_profile}'")
             
             # Build active profile execution list (e.g., primary crawler + companion asset sweep)
@@ -55,15 +55,16 @@ class ScraperDispatcher:
         # Step 3: Execute multi-crawler dispatch pipeline
         await self._dispatch_to_crawlers(profiles, sanitized_start, keyword_filter=keyword_filter)
 
-    async def _fetch_tier_one_samples(self, start_url: str) -> list[str]:
-        """Fetches the start URL and extracts sample child links for fingerprinting."""
+    async def _fetch_tier_one_samples(self, start_url: str) -> tuple[list[str], str]:
+        """Fetches the start URL, extracts sample child links, and returns raw HTML content for fingerprinting."""
         sample_urls = []
+        raw_html = ""
         try:
             results = await self.downloader.download_batch([(start_url, "probe_index.html")])
             for url, saved_file in results:
                 if saved_file and saved_file.exists() and saved_file.suffix.lower() == ".html":
-                    content = saved_file.read_text(encoding="utf-8", errors="ignore")
-                    soup = BeautifulSoup(content, "lxml")
+                    raw_html = saved_file.read_text(encoding="utf-8", errors="ignore")
+                    soup = BeautifulSoup(raw_html, "lxml")
                     allowed_netloc = URL(start_url).host
                     
                     for a_tag in soup.find_all("a", href=True):
@@ -79,7 +80,7 @@ class ScraperDispatcher:
         except Exception as e:
             print(f"    [!] Warning during probe phase: {e}")
             
-        return sample_urls
+        return sample_urls, raw_html
 
     async def _dispatch_to_crawlers(self, profiles: list[str], start_url: str, keyword_filter: str = None):
         """Delegates execution to one or more specialized crawlers concurrently with optional keyword filtering."""

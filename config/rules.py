@@ -43,9 +43,9 @@ class ScrapingRules:
             return False
 
     @staticmethod
-    def fingerprint_architecture(sample_urls: list[str]) -> str:
+    def fingerprint_architecture(sample_urls: list[str], raw_html: str = "") -> str:
         """
-        Analyzes a batch of discovered sample URLs from Tier 1 to 
+        Analyzes a batch of discovered sample URLs and raw HTML content from Tier 1 to 
         fingerprint the site's architectural profile across the full crawler suite:
         - 'openapi': Developer portals / API specification endpoints
         - 'sitemap': XML index sitemaps
@@ -53,8 +53,28 @@ class ScrapingRules:
         - 'asset_index': Binary file mirrors and downloadable repositories
         - 'flat_paged': Relies heavily on pagination or query lists
         - 'hierarchical': Deep folder trees and subcategories
+        - 'headless': JavaScript-heavy SPAs and dynamic document viewers
         - 'universal': Standard general-purpose fallback crawl
         """
+        html_lower = raw_html.lower()
+
+        # Check for JavaScript-Heavy SPAs / Dynamic Document Viewers (Headless Trigger)
+        spa_indicators = [
+            "__next_data__", 
+            "window.__nuxt__", 
+            "react-root", 
+            "app-root", 
+            "scribd", 
+            "hydrated",
+            "ng-app",
+            "pdf-viewer",
+            "document-viewer"
+        ]
+        has_spa_markers = any(marker in html_lower for marker in spa_indicators)
+        
+        if (len(sample_urls) <= 3 and has_spa_markers) or (len(sample_urls) == 0 and len(html_lower) > 0):
+            return "headless"
+
         if not sample_urls:
             return "universal"
 
@@ -88,4 +108,4 @@ class ScrapingRules:
         if avg_depth > 2:
             return "hierarchical"
         
-        return "universal" # Default fallback for simple or unstructured sites
+        return "universal"
