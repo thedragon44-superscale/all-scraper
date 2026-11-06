@@ -1,5 +1,6 @@
 import hashlib
 import tempfile
+import sys
 from pathlib import Path
 from typing import Optional, List
 from yarl import URL
@@ -8,7 +9,8 @@ class BaseCrawler:
     """
     Shared base utility providing centralized logging, active engine 
     announcements, live-streaming discovery feedback, temporary file management,
-    interactive branch selection, and content-based keyword filtering.
+    universal per-tier branch scoping with path grouping, pagination, and deduplication, 
+    and content-based keyword filtering.
     """
     def __init__(self, name: str, max_concurrent: int = 3, keyword_filter: Optional[str] = None):
         self.crawler_name = name
@@ -91,30 +93,100 @@ class BaseCrawler:
             return True
         return self.keyword_filter.lower() in text_content.lower()
 
-    def _prompt_branch_selection(self, discovered_branches: List[str]) -> List[str]:
+    def select_branches(
+        self, 
+        tier_urls: List[str], 
+        tier_num: int = 1, 
+        branch_prompt_mode: str = "first", 
+        non_interactive: bool = False
+    ) -> List[str]:
         """
-        Presents an interactive branch selection menu after Tier 1 discovery
-        to let the user scope down the crawl to a specific year or subdirectory branch.
+        Universal per-tier branch scoping method inherited by all crawlers.
+        Handles path grouping, prefix deduplication, pagination, interactive menus, 
+        and non-TTY/non-interactive safety fallbacks.
         """
-        if not discovered_branches:
+        if not tier_urls:
             return []
-        
+
+        # Deduplicate and normalize URLs
+        clean_urls = sorted(list(set(tier_urls)))
+
+        # Group URLs by distinct first-level path segments
+        branches_map = {}
+        for u in clean_urls:
+            try:
+                parsed = URL(u)
+                segments = [s for s in parsed.path.strip("/").split("/") if s]
+                if segments:
+                    branch_key = f"/{segments[0]}/"
+                else:
+                    branch_key = "/"
+                if branch_key not in branches_map:
+                    branches_map[branch_key] = []
+                branches_map[branch_key].append(u)
+            except Exception:
+                if "/" not in branches_map:
+                    branches_map["/"] = []
+                branches_map["/"].append(u)
+
+        branch_keys = sorted(list(branches_map.keys()))
+
+        # Guard checks for non-interactive execution, non-TTY streams, or prompt mode constraints
+        if len(branch_keys) <= 1 or branch_prompt_mode == "none" or non_interactive or not sys.stdin.isatty():
+            return clean_urls
+
+        if branch_prompt_mode == "first" and tier_num > 1:
+            return clean_urls
+
         print(f"\n========================================")
-        print(f" [?] BRANCH DISCOVERY CHECKPOINT ({len(discovered_branches)} paths found)")
+        print(f" [?] TIER {tier_num} BRANCH DISCOVERY CHECKPOINT ({len(branch_keys)} branch groups found)")
         print(f"========================================")
-        print("  [0] Proceed with ALL discovered branches")
-        for idx, branch in enumerate(discovered_branches[:15], 1):
-            print(f"  [{idx}] {branch}")
-        if len(discovered_branches) > 15:
-            print(f"    ... and {len(discovered_branches) - 15} more branches.")
+        print("  [0] Proceed with ALL branch groups")
+        print("  [s] Skip remaining tier prompts for this crawl")
+        print("  [q] Graceful abort (finish pending downloads and exit)")
         
-        choice = input("\nSelect a specific branch number, or press Enter for all: ").strip()
-        if choice.isdigit():
-            idx = int(choice)
-            if 1 <= idx <= len(discovered_branches):
-                selected = discovered_branches[idx - 1]
-                print(f"[*] Scoping crawl strictly to branch: {selected}")
-                return [selected]
-        
-        print("[*] Proceeding with full discovery traversal.")
-        return discovered_branches
+        # Paginated display limit
+        display_limit = 15
+        for idx, b_key in enumerate(branch_keys[:display_limit], 1):
+            sample_count = len(branches_map[b_key])
+            print(f"  [{idx}] {b_key} ({sample_count} links)")
+        if len(branch_keys) > display_limit:
+            print(f"    ... and {len(branch_keys) - display_limit} more branch groups.")
+
+        try:
+            choice = input("\nSelect branch number(s) [e.g. 1, 2 or 0/s/q]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n[*] Input interrupted. Defaulting to all discovered branches.")
+            return clean_urls
+
+        if choice == "q":
+            print("\n[*] Graceful abort requested by user. Exiting pipeline.")
+            sys.exit(0)
+        elif choice == "s":
+            print("\n[*] Skipping remaining tier branch prompts.")
+            return clean_urls
+        elif choice == "" or choice == "0":
+            return clean_urls
+
+        # Parse user selections (supports comma or space separation)
+        selected_urls = []
+        indices = []
+        for part in choice.replace(",", " ").split():
+            if part.isdigit():
+                idx = int(part)
+                if 1 <= idx <= len(branch_keys):
+                    indices.append(idx - 1)
+
+        if indices:
+            for idx in indices:
+                b_key = branch_keys[idx]
+                selected_urls.extend(branches_map[b_key])
+            print(f"[*] Scoping crawl strictly to {len(indices)} selected branch group(s).")
+            return selected_urls
+
+        print("[*] Unrecognized selection. Defaulting to all discovered branches.")
+        return clean_urls
+
+    def _prompt_branch_selection(self, discovered_branches: List[str]) -> List[str]:
+        """Backward-compatible wrapper mapping to select_branches at Tier 1."""
+        return self.select_branches(discovered_branches, tier_num=1, branch_prompt_mode="all", non_interactive=False)

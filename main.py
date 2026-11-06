@@ -29,6 +29,8 @@ PROFILE_CHOICES = [
     "universal"
 ]
 
+BRANCH_PROMPT_CHOICES = ["all", "first", "every", "none"]
+
 
 def get_target_url() -> str:
     """Presents an interactive menu of recent targets or accepts a new URL."""
@@ -62,8 +64,15 @@ def get_target_url() -> str:
     return new_url
 
 
-def run_scraper_flow(forced_profile: str = None, concurrency: int = 3, url: str = None, keyword_filter: str = None):
-    """Handles target selection and dispatches the multi-crawler pipeline with optional keyword filtering."""
+def run_scraper_flow(
+    forced_profile: str = None, 
+    concurrency: int = 3, 
+    url: str = None, 
+    keyword_filter: str = None,
+    branch_prompt: str = "first",
+    non_interactive: bool = False
+):
+    """Handles target selection and dispatches the multi-crawler pipeline with full parameter wiring."""
     target_url = url or get_target_url()
     if not target_url:
         print("[!] No target URL specified. Returning to main menu.")
@@ -72,19 +81,27 @@ def run_scraper_flow(forced_profile: str = None, concurrency: int = 3, url: str 
     if forced_profile == "auto":
         forced_profile = None
 
-    if not keyword_filter:
+    if not keyword_filter and not non_interactive:
         kw_input = input("Enter optional keyword or phrase filter (Press Enter to skip): ").strip()
         if kw_input:
             keyword_filter = kw_input
 
     print(f"\n[*] Initializing Scraper Dispatcher for: {target_url}")
     print(f"[*] Concurrency Limit: {concurrency}")
+    print(f"[*] Branch Prompt Strategy: {branch_prompt}")
+    if non_interactive:
+        print(f"[*] Non-Interactive Flag Active: Skipping interactive prompts.")
     if keyword_filter:
         print(f"[*] Keyword Filter Active: \"{keyword_filter}\"")
 
     try:
         dispatcher = ScraperDispatcher(max_concurrent=concurrency)
-        dispatcher.run(target_url, forced_profile=forced_profile, keyword_filter=keyword_filter)
+        dispatcher.run(
+            target_url, 
+            forced_profile=forced_profile, 
+            keyword_filter=keyword_filter,
+            non_interactive=non_interactive
+        )
     except Exception as e:
         print(f"\n[!] CRITICAL SCRAPER FAILURE: {type(e).__name__} - {e}")
         print("----------------------------------------")
@@ -160,8 +177,21 @@ def main():
         "--profile", 
         type=str, 
         choices=PROFILE_CHOICES,
-        default=None,
-        help="Force a specific crawler profile override"
+        default="auto",
+        help="Force a specific crawler profile override or use automated fingerprinting (default: auto)"
+    )
+    parser.add_argument(
+        "--branch-prompt",
+        type=str,
+        choices=BRANCH_PROMPT_CHOICES,
+        default="first",
+        help="Granularity for interactive tier branch scoping prompts: 'all', 'first' (default), 'every', or 'none'"
+    )
+    parser.add_argument(
+        "--yes", "-y", "--non-interactive",
+        action="store_true",
+        dest="non_interactive",
+        help="Skip all interactive prompts and automatically select recommended choices (for cron or automated use)"
     )
     parser.add_argument("--concurrency", type=int, default=3, help="Max concurrent asynchronous downloads (default: 3)")
     parser.add_argument("--keyword", type=str, default=None, help="Optional keyword or phrase filter for text content inspection")
@@ -176,7 +206,14 @@ def main():
     # Handle direct CLI calls if flags are passed, otherwise default to interactive hub
     if args.url or args.scrape:
         profile = None if args.profile == "auto" else args.profile
-        run_scraper_flow(forced_profile=profile, concurrency=args.concurrency, url=args.url, keyword_filter=args.keyword)
+        run_scraper_flow(
+            forced_profile=profile, 
+            concurrency=args.concurrency, 
+            url=args.url, 
+            keyword_filter=args.keyword,
+            branch_prompt=args.branch_prompt,
+            non_interactive=args.non_interactive
+        )
     elif args.parse_images:
         harvest_assets(base_url=args.base_url)
     elif args.verify:
