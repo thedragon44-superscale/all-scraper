@@ -2,20 +2,29 @@ import asyncio
 import json
 from pathlib import Path
 from yarl import URL
-from config import DATA_DIR, ScrapingRules
+from config import DATA_DIR
 from scraper.downloader import UniversalDownloader
+from utils import URLUtils
 from .base import BaseCrawler
 
 class OpenApiSwaggerCrawler(BaseCrawler):
     def __init__(self, max_concurrent: int = 3, keyword_filter: str = None):
         """
         Specialized crawler targeting OpenAPI and Swagger specification endpoints 
-        to automatically parse API routes, parameters, schemas, and keyword filtering.
+        to automatically parse API routes, parameters, schemas, and keyword filtering,
+        leveraging centralized URL sanitization.
         """
         super().__init__(name="OpenApiSwaggerCrawler", max_concurrent=max_concurrent, keyword_filter=keyword_filter)
         self.downloader = UniversalDownloader(max_concurrent=max_concurrent)
         self.output_dir = DATA_DIR / "api_specs"
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Initialize default request headers using case-insensitive mapping
+        self.default_headers["Accept"] = "application/json, application/yaml, text/plain, */*"
+
+    def _sanitize_url(self, raw_url: str) -> str:
+        """Delegates URL sanitization to the centralized URLUtils utility."""
+        return URLUtils.sanitize_url(raw_url)
 
     async def crawl_async(self, start_url: str):
         sanitized_start = self._sanitize_url(start_url)
@@ -55,10 +64,22 @@ class OpenApiSwaggerCrawler(BaseCrawler):
                     if not self._matches_keyword(content):
                         continue
 
-                    # Parse JSON specification schema
-                    spec_data = json.loads(content)
+                    # Parse JSON specification schema with fallback handling
+                    try:
+                        spec_data = json.loads(content)
+                    except json.JSONDecodeError:
+                        # Fallback basic YAML parsing if PyYAML is available or treat as raw text schema
+                        spec_data = None
+                        if "paths:" in content or "openapi:" in content or "swagger:" in content:
+                            print(f"    [*] Detected YAML/Text OpenAPI spec structure at {url}")
+                            spec_found = True
+                            summary_path = self.output_dir / "parsed_endpoints_summary.txt"
+                            summary_path.write_text(content, encoding="utf-8")
+                            print(f"[*] Saved raw specification schema to: {summary_path}")
+                            break
+                        continue
+
                     spec_found = True
-                    
                     print(f"\n[+] Successfully parsed OpenAPI specification from: {url}")
                     
                     info = spec_data.get("info", {})
@@ -83,8 +104,6 @@ class OpenApiSwaggerCrawler(BaseCrawler):
                     print(f"[*] Saved full endpoint summary map to: {summary_path}")
                     break
                     
-                except json.JSONDecodeError:
-                    continue
                 except Exception as e:
                     print(f"    [!] Error processing spec file from {url}: {e}")
 

@@ -5,13 +5,15 @@ from yarl import URL
 from tqdm import tqdm
 from parser.html_parser import HTMLDocumentParser
 from scraper.downloader import UniversalDownloader
+from utils import URLUtils
 from .base import BaseCrawler
 
 class UniversalCrawler(BaseCrawler):
     def __init__(self, max_concurrent: int = 3, filter_func: Optional[Callable[[str], bool]] = None, keyword_filter: Optional[str] = None):
         """
         Initializes a universal, target-agnostic async web crawler with live streaming logs,
-        hash-based temp files, content-based keyword filtering, and multi-core multiprocessing parsing.
+        hash-based temp files, content-based keyword filtering, and multi-core multiprocessing parsing,
+        utilizing centralized URL sanitization.
         
         :param max_concurrent: Maximum concurrent downloads.
         :param filter_func: Optional callback function returning True if a URL path should be skipped.
@@ -22,6 +24,13 @@ class UniversalCrawler(BaseCrawler):
         self.visited_urls = set()
         self.visited_assets = set()
         self.filter_func = filter_func
+        
+        # Initialize default request headers using case-insensitive mapping
+        self.default_headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+
+    def _sanitize_url(self, raw_url: str) -> str:
+        """Delegates URL sanitization to the centralized URLUtils utility."""
+        return URLUtils.sanitize_url(raw_url)
 
     def _should_filter_url(self, url_str: str) -> bool:
         """Evaluates custom site-specific filter rules if injected via constructor."""
@@ -56,6 +65,11 @@ class UniversalCrawler(BaseCrawler):
         # ==========================================
         while current_tier:
             tier_count += 1
+            
+            # Apply universal per-tier branch scoping check for multi-branch filtering if applicable
+            if tier_count > 1:
+                current_tier = self.select_branches(current_tier, tier_num=tier_count, branch_prompt_mode="first", non_interactive=False)
+
             batch_pairs = []
             for url_str in current_tier:
                 clean_url = self._sanitize_url(url_str)
@@ -105,7 +119,7 @@ class UniversalCrawler(BaseCrawler):
 
                     # 1. Process discovered navigation links
                     for clean_target in nav_links:
-                        if self._should_filter_url(clean_target):
+                        if self._should_filter_url(clean_target) or HTMLDocumentParser.is_high_risk_url(clean_target):
                             continue
                         
                         if clean_target not in self.visited_urls and clean_target not in next_tier and clean_target not in current_tier:
@@ -114,7 +128,7 @@ class UniversalCrawler(BaseCrawler):
 
                     # 2. Process discovered binary/asset links
                     for clean_asset in asset_urls:
-                        if self._should_filter_url(clean_asset):
+                        if self._should_filter_url(clean_asset) or HTMLDocumentParser.is_high_risk_url(clean_asset):
                             continue
                         
                         if clean_asset not in self.visited_assets:

@@ -6,13 +6,15 @@ from pathlib import Path
 # Ensure project root is in sys.path so modules resolve cleanly
 sys.path.append(str(Path(__file__).resolve().parent))
 
-from config import DATA_DIR
+from config import DATA_DIR, MAX_CONCURRENT_DEFAULT
 from utils.dispatch import ScraperDispatcher
 from parser.image_parser import harvest_assets
 from utils.verify_data import run_verification
 from utils.history import load_url_history, save_url_to_history
 from utils.clean_dirs import clean_empty_directories
 from utils.reset_system import reset_system
+from utils.stitch_pdf import stitch_images_to_pdf
+from utils import URLUtils
 
 
 PROFILE_CHOICES = [
@@ -52,31 +54,37 @@ def get_target_url() -> str:
             idx = int(choice)
             if 1 <= idx <= len(history):
                 selected = history[idx - 1]
-                print(f"[*] Using cached target: {selected}")
-                return selected
+                sanitized_selected = URLUtils.sanitize_url(selected)
+                print(f"[*] Using cached target: {sanitized_selected}")
+                return sanitized_selected
         elif choice.startswith("http"):
-            save_url_to_history(choice)
-            return choice
+            sanitized_choice = URLUtils.sanitize_url(choice)
+            save_url_to_history(sanitized_choice)
+            return sanitized_choice
 
     new_url = input("\nEnter target BASE_URL: ").strip()
     if new_url:
-        save_url_to_history(new_url)
+        sanitized_new = URLUtils.sanitize_url(new_url)
+        save_url_to_history(sanitized_new)
+        return sanitized_new
     return new_url
 
 
 def run_scraper_flow(
     forced_profile: str = None, 
-    concurrency: int = 3, 
+    concurrency: int = MAX_CONCURRENT_DEFAULT, 
     url: str = None, 
     keyword_filter: str = None,
     branch_prompt: str = "first",
     non_interactive: bool = False
 ):
-    """Handles target selection and dispatches the multi-crawler pipeline with full parameter wiring."""
-    target_url = url or get_target_url()
-    if not target_url:
+    """Handles target selection and dispatches the multi-crawler pipeline with full parameter wiring and centralized URL sanitization."""
+    raw_target = url or get_target_url()
+    if not raw_target:
         print("[!] No target URL specified. Returning to main menu.")
         return
+
+    target_url = URLUtils.sanitize_url(raw_target)
 
     if forced_profile == "auto":
         forced_profile = None
@@ -117,27 +125,38 @@ def interactive_menu():
         print("========================================")
         print(" [1] Scrape Target Website (Smart Dispatcher & Multi-Crawler)")
         print(" [2] Harvest Local Assets & Images")
-        print(" [3] Run Local Storage Diagnostics")
-        print(" [4] Clean Empty Nested Directories")
-        print(" [5] Full System Reset (Wipe Data Directory)")
-        print(" [6] Exit")
+        print(" [3] Stitch Downloaded Tiles into PDF")
+        print(" [4] Run Local Storage Diagnostics")
+        print(" [5] Clean Empty Nested Directories")
+        print(" [6] Full System Reset (Wipe Data Directory)")
+        print(" [7] Exit")
         print("----------------------------------------")
         
-        choice = input("Select an option (1-6): ").strip()
+        choice = input("Select an option (1-7): ").strip()
         
         if choice == "1":
             run_scraper_flow()
             
         elif choice == "2":
             base_url = input("Enter base URL for resolving relative assets (optional, press Enter to skip): ").strip()
+            if base_url:
+                base_url = URLUtils.sanitize_url(base_url)
             print("\n[*] Starting universal asset harvester...")
             try:
                 harvest_assets(base_url=base_url)
             except Exception as e:
                 print(f"\n[!] ERROR in Asset Harvester: {type(e).__name__} - {e}")
                 traceback.print_exc()
-                
+
         elif choice == "3":
+            print("\n[*] Running PDF Stitcher Utility...")
+            try:
+                stitch_images_to_pdf()
+            except Exception as e:
+                print(f"\n[!] ERROR in PDF Stitcher: {type(e).__name__} - {e}")
+                traceback.print_exc()
+            
+        elif choice == "4":
             print("\n[*] Running local storage diagnostics verifier...")
             try:
                 run_verification()
@@ -145,7 +164,7 @@ def interactive_menu():
                 print(f"\n[!] ERROR in Verification Diagnostics: {type(e).__name__} - {e}")
                 traceback.print_exc()
                 
-        elif choice == "4":
+        elif choice == "5":
             print("\n[*] Running empty directory cleanup utility...")
             try:
                 clean_empty_directories()
@@ -153,7 +172,7 @@ def interactive_menu():
                 print(f"\n[!] ERROR in Directory Cleaner: {type(e).__name__} - {e}")
                 traceback.print_exc()
 
-        elif choice == "5":
+        elif choice == "6":
             print("\n[*] Running system reset utility...")
             try:
                 reset_system()
@@ -161,12 +180,12 @@ def interactive_menu():
                 print(f"\n[!] ERROR in System Reset: {type(e).__name__} - {e}")
                 traceback.print_exc()
                 
-        elif choice == "6":
+        elif choice == "7":
             print("[*] Exiting pipeline hub. Goodbye!")
             sys.exit(0)
             
         else:
-            print("[!] Invalid choice. Please enter a number between 1 and 6.")
+            print("[!] Invalid choice. Please enter a number between 1 and 7.")
 
 
 def main():
@@ -193,10 +212,11 @@ def main():
         dest="non_interactive",
         help="Skip all interactive prompts and automatically select recommended choices (for cron or automated use)"
     )
-    parser.add_argument("--concurrency", type=int, default=3, help="Max concurrent asynchronous downloads (default: 3)")
+    parser.add_argument("--concurrency", type=int, default=MAX_CONCURRENT_DEFAULT, help=f"Max concurrent asynchronous downloads (default: {MAX_CONCURRENT_DEFAULT})")
     parser.add_argument("--keyword", type=str, default=None, help="Optional keyword or phrase filter for text content inspection")
     parser.add_argument("--parse-images", action="store_true", help="Run asset harvesting on local HTML files")
     parser.add_argument("--base-url", type=str, default="", help="Base URL for resolving relative asset links")
+    parser.add_argument("--stitch-pdf", action="store_true", help="Stitch downloaded page tiles into a master PDF")
     parser.add_argument("--verify", action="store_true", help="Run local storage and file diagnostics")
     parser.add_argument("--reset-system", action="store_true", help="Wipe local data and asset directories")
     parser.add_argument("--clean-dirs", action="store_true", help="Prune empty nested skeleton directories")
@@ -206,16 +226,20 @@ def main():
     # Handle direct CLI calls if flags are passed, otherwise default to interactive hub
     if args.url or args.scrape:
         profile = None if args.profile == "auto" else args.profile
+        sanitized_cli_url = URLUtils.sanitize_url(args.url) if args.url else None
         run_scraper_flow(
             forced_profile=profile, 
             concurrency=args.concurrency, 
-            url=args.url, 
+            url=sanitized_cli_url, 
             keyword_filter=args.keyword,
             branch_prompt=args.branch_prompt,
             non_interactive=args.non_interactive
         )
     elif args.parse_images:
-        harvest_assets(base_url=args.base_url)
+        sanitized_base_url = URLUtils.sanitize_url(args.base_url) if args.base_url else ""
+        harvest_assets(base_url=sanitized_base_url)
+    elif args.stitch_pdf:
+        stitch_images_to_pdf()
     elif args.verify:
         run_verification()
     elif args.reset_system:

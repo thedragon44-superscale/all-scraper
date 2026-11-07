@@ -4,15 +4,16 @@ from pathlib import Path
 from typing import List, Tuple, Optional, Set
 from bs4 import BeautifulSoup
 from yarl import URL
+from utils import URLUtils
 
 # Standard whitelists for path validation
 VALID_EXTENSIONS: Set[str] = {
     ".html", ".htm", ".pdf", ".png", ".jpg", 
-    ".jpeg", ".svg", ".gif", ".webp", ".zip"
+    ".jpeg", ".svg", ".gif", ".webp", ".zip", ".ico"
 }
 
 BINARY_EXTENSIONS: Set[str] = {
-    ".pdf", ".png", ".jpg", ".jpeg", ".svg", ".gif", ".webp", ".zip"
+    ".pdf", ".png", ".jpg", ".jpeg", ".svg", ".gif", ".webp", ".zip", ".ico"
 }
 
 HIGH_RISK_PATTERNS: Set[str] = {
@@ -60,22 +61,9 @@ class HTMLDocumentParser:
     @staticmethod
     def sanitize_url(raw_url: str) -> str:
         """
-        Sanitizes and normalizes URL paths using yarl. Proactively enforces trailing 
-        slashes on directory endpoints to prevent server-side redirect loops.
+        Sanitizes and normalizes URL paths using URLUtils from the utility package.
         """
-        try:
-            base_url = raw_url.split("#")[0]
-            url_obj = URL(base_url)
-            decoded_path = url_obj.path.replace("%2F", "/")
-            
-            # Enforce trailing slash on directories without extensions
-            if not Path(decoded_path).suffix and not decoded_path.endswith("/"):
-                decoded_path += "/"
-                
-            reconstructed = url_obj.with_path(decoded_path).with_query(url_obj.query)
-            return str(reconstructed)
-        except Exception:
-            return raw_url.split("#")[0]
+        return URLUtils.sanitize_url(raw_url)
 
     @staticmethod
     def extract_text_content(html_content: str) -> str:
@@ -103,7 +91,9 @@ class HTMLDocumentParser:
         allowed_base_path: str
     ) -> Tuple[List[str], List[str]]:
         """
-        Parses HTML content to extract in-scope child navigation links and binary assets.
+        Parses HTML content to extract in-scope child navigation links and binary assets,
+        incorporating robust base URL self-inference, CDN/subdomain asset whitelisting,
+        and lazy-load attribute harvesting for high-res images.
         
         :return: Tuple of (navigation_links, asset_urls)
         """
@@ -111,47 +101,83 @@ class HTMLDocumentParser:
         navigation_links: List[str] = []
         asset_urls: List[str] = []
 
+        # Self-infer base URL if missing or invalid
+        doc_base_url = base_url
+        if not doc_base_url or not doc_base_url.startswith("http"):
+            base_tag = soup.find("base", href=True)
+            if base_tag:
+                doc_base_url = base_tag["href"]
+            else:
+                canonical = soup.find("link", rel="canonical")
+                if canonical and canonical.get("href"):
+                    doc_base_url = canonical["href"]
+
+        # Extract root domain for CDN and subdomain asset matching (e.g. scribd.com)
+        allowed_root_domain = ""
+        if allowed_netloc:
+            parts = allowed_netloc.split(".")
+            if len(parts) >= 2:
+                allowed_root_domain = ".".join(parts[-2:])
+            else:
+                allowed_root_domain = allowed_netloc
+
         # 1. Parse anchor tags for navigation and downloadable files
         for a_tag in soup.find_all("a", href=True):
             href = a_tag["href"].strip()
-            if not href or href.startswith("javascript:") or href.startswith("#"):
+            if not href or href.startswith("javascript:") or href.startswith("#") or href.startswith("data:"):
                 continue
 
             try:
-                absolute_url = URL(base_url).join(URL(href))
+                target_base = doc_base_url if doc_base_url else "https://" + allowed_netloc
+                absolute_url = URL(target_base).join(URL(href))
                 clean_target = cls.sanitize_url(str(absolute_url))
 
                 if cls.is_high_risk_url(clean_target):
                     continue
 
                 parsed_target = URL(clean_target)
-                if parsed_target.host == allowed_netloc and parsed_target.path.startswith(allowed_base_path):
-                    target_ext = Path(parsed_target.path).suffix.lower()
+                target_ext = Path(parsed_target.path).suffix.lower()
 
-                    if target_ext in BINARY_EXTENSIONS or "download" in parsed_target.path.lower():
+                is_valid_asset_ext = target_ext in BINARY_EXTENSIONS or "download" in parsed_target.path.lower()
+
+                if is_valid_asset_ext:
+                    # Allow assets hosted on exact netloc, subdomains, or shared root domain (CDNs)
+                    host_matches = parsed_target.host == allowed_netloc or (allowed_root_domain and parsed_target.host and parsed_target.host.endswith(allowed_root_domain))
+                    if host_matches or not allowed_netloc:
                         if clean_target not in asset_urls:
                             asset_urls.append(clean_target)
-                    else:
+                else:
+                    # Navigation links strictly scoped to allowed netloc and base path
+                    if parsed_target.host == allowed_netloc and parsed_target.path.startswith(allowed_base_path):
                         if clean_target not in navigation_links:
                             navigation_links.append(clean_target)
             except Exception:
                 continue
 
-        # 2. Parse image tags for visual assets
-        for img_tag in soup.find_all("img", src=True):
-            src = img_tag["src"].strip()
-            if not src or src.startswith("data:"):
+        # 2. Parse image tags for visual assets (supporting lazy-load attributes)
+        for img_tag in soup.find_all("img"):
+            # Check alternative high-res lazy-load attributes before falling back to src
+            src = (
+                img_tag.get("data-original") or 
+                img_tag.get("data-src") or 
+                img_tag.get("data-lazy-src") or 
+                img_tag.get("src", "")
+            ).strip()
+
+            if not src or src.startswith("data:") or src.startswith("javascript:"):
                 continue
 
             try:
-                absolute_img = URL(base_url).join(URL(src))
+                target_base = doc_base_url if doc_base_url else "https://" + allowed_netloc
+                absolute_img = URL(target_base).join(URL(src))
                 clean_img = cls.sanitize_url(str(absolute_img))
 
                 if cls.is_high_risk_url(clean_img):
                     continue
 
                 parsed_img = URL(clean_img)
-                if parsed_img.host == allowed_netloc and parsed_img.path.startswith(allowed_base_path):
+                host_matches = parsed_img.host == allowed_netloc or (allowed_root_domain and parsed_img.host and parsed_img.host.endswith(allowed_root_domain))
+                if host_matches or not allowed_netloc:
                     if clean_img not in asset_urls:
                         asset_urls.append(clean_img)
             except Exception:

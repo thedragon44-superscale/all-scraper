@@ -25,6 +25,9 @@ class AuthenticatedCrawler(BaseCrawler):
         self.downloader = UniversalDownloader(max_concurrent=max_concurrent)
         self.visited_urls = set()
         self.visited_assets = set()
+        
+        # Initialize default request headers using case-insensitive mapping
+        self.default_headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
 
     async def crawl_async(self, start_url: str, login_url: str = None, username: str = None, password: str = None):
         if not PLAYWRIGHT_AVAILABLE:

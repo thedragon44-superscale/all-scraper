@@ -1,10 +1,22 @@
-from .history import load_url_history, save_url_to_history
-from .clean_dirs import clean_empty_directories
-from .dispatch import ScraperDispatcher
+from .url import URLUtils
+from .datatypes import CaseInsensitiveDict, LocalCache
+from .scheduler import RequestScheduler
+from .download_handlers import (
+    PipelineError,
+    NetworkTimeoutError,
+    ConnectionRefusedError,
+    DNSResolutionError,
+    handle_download_exceptions
+)
 
 __all__ = [
-    "load_url_history", 
-    "save_url_to_history", 
-    "clean_empty_directories",
-    "ScraperDispatcher"
+    "URLUtils",
+    "CaseInsensitiveDict",
+    "LocalCache",
+    "RequestScheduler",
+    "PipelineError",
+    "NetworkTimeoutError",
+    "ConnectionRefusedError",
+    "DNSResolutionError",
+    "handle_download_exceptions"
 ]

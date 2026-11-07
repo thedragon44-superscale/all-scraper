@@ -1,8 +1,8 @@
 import asyncio
 from yarl import URL
 from bs4 import BeautifulSoup
-from config import ScrapingRules
 from scraper.downloader import UniversalDownloader
+from utils import URLUtils
 from scraper import (
     HierarchicalCrawler, 
     FlatCrawler, 
@@ -20,13 +20,18 @@ class ScraperDispatcher:
     """
     Orchestration utility that probes a target URL, analyzes architectural candidates 
     with confidence scores, presents an interactive selection menu, and dynamically 
-    dispatches a coordinated multi-crawler swarm with deduplication.
+    dispatches a coordinated multi-crawler swarm with shared deduplication, leveraging 
+    centralized URL sanitization.
     """
 
     def __init__(self, max_concurrent: int = 3):
         self.max_concurrent = max_concurrent
         self.downloader = UniversalDownloader(max_concurrent=max_concurrent)
         self.global_seen_urls = set()
+
+    def _sanitize_url(self, raw_url: str) -> str:
+        """Delegates URL sanitization to the centralized URLUtils utility."""
+        return URLUtils.sanitize_url(raw_url)
 
     async def probe_and_route(
         self, 
@@ -39,7 +44,7 @@ class ScraperDispatcher:
         Performs a lightweight Tier 1 probe, evaluates candidate profiles with reasoning,
         prompts the user for swarm execution strategy, or respects overrides/non-interactive flags.
         """
-        sanitized_start = str(URL(start_url))
+        sanitized_start = self._sanitize_url(start_url)
         print(f"[*] Dispatcher probing target: {sanitized_start}")
 
         if forced_profile:
@@ -50,6 +55,7 @@ class ScraperDispatcher:
             sample_urls, raw_html, response_headers = await self._fetch_tier_one_samples(sanitized_start)
             
             # Step 2: Analyze candidates with confidence scores and reasoning
+            from config import ScrapingRules
             candidates = ScrapingRules.analyze_profiles_detailed(sample_urls, raw_html, response_headers)
             
             # Step 3: Resolve profiles based on interactivity and user selection
@@ -76,11 +82,12 @@ class ScraperDispatcher:
                         if not href or href.startswith("javascript:") or href.startswith("#"):
                             continue
                         absolute_url = URL(start_url).join(URL(href))
-                        clean_target = str(absolute_url)
+                        clean_target = self._sanitize_url(str(absolute_url))
                         
                         if URL(clean_target).host == allowed_netloc:
-                            if clean_target not in sample_urls:
+                            if clean_target not in sample_urls and clean_target not in self.global_seen_urls:
                                 sample_urls.append(clean_target)
+                                self.global_seen_urls.add(clean_target)
         except Exception as e:
             print(f"    [!] Warning during probe phase: {e}")
             
@@ -144,7 +151,7 @@ class ScraperDispatcher:
             return [top_candidate]
 
     async def _dispatch_to_crawlers(self, profiles: list[str], start_url: str, keyword_filter: str = None):
-        """Delegates execution to multiple specialized crawlers concurrently with shared URL deduplication."""
+        """Delegates execution to multiple specialized crawlers concurrently with shared URL deduplication tracking."""
         print(f"\n[*] Dispatching active crawler swarm: {profiles}")
         
         tasks = []

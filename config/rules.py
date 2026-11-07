@@ -1,5 +1,6 @@
 from yarl import URL
 from bs4 import BeautifulSoup
+from utils import URLUtils
 
 class ScrapingRules:
     """
@@ -10,7 +11,8 @@ class ScrapingRules:
     @staticmethod
     def is_high_risk_url(url_str: str) -> bool:
         try:
-            parsed = URL(url_str)
+            sanitized = URLUtils.sanitize_url(url_str)
+            parsed = URL(sanitized)
             path = parsed.path
             risk_indicators = [',', '&', '(', ')', '%2C', '%26', '%28', '%29']
             return any(indicator in path for indicator in risk_indicators)
@@ -20,7 +22,8 @@ class ScrapingRules:
     @staticmethod
     def is_pagination_url(url_str: str) -> bool:
         try:
-            parsed = URL(url_str)
+            sanitized = URLUtils.sanitize_url(url_str)
+            parsed = URL(sanitized)
             query_keys = parsed.query.keys()
             pagination_params = {'page', 'p', 'offset', 'start', 'cursor'}
             if any(param in query_keys for param in pagination_params):
@@ -43,6 +46,9 @@ class ScrapingRules:
         response_headers = response_headers or {}
         html_lower = raw_html.lower()
         soup = BeautifulSoup(raw_html, "lxml") if raw_html else None
+        
+        # Pre-sanitize sample URLs for reliable pattern matching
+        sanitized_samples = [URLUtils.sanitize_url(u) for u in sample_urls if u]
         
         candidates = []
 
@@ -67,13 +73,13 @@ class ScrapingRules:
 
         # 3. Check for API-First or GraphQL Payloads / OpenAPI Specs
         content_type = response_headers.get("content-type", "").lower()
-        if "application/json" in content_type or "application/graphql" in content_type or any("graphql" in u.lower() for u in sample_urls):
+        if "application/json" in content_type or "application/graphql" in content_type or any("graphql" in u.lower() for u in sanitized_samples):
             candidates.append({
                 "profile": "openapi",
                 "confidence": 0.92,
                 "reason": "API-first endpoint or JSON/GraphQL payload structure detected."
             })
-        elif any(any(kw in u.lower() for kw in ["swagger", "openapi", "api-docs"]) for u in sample_urls):
+        elif any(any(kw in u.lower() for kw in ["swagger", "openapi", "api-docs"]) for u in sanitized_samples):
             candidates.append({
                 "profile": "openapi",
                 "confidence": 0.98,
@@ -81,7 +87,7 @@ class ScrapingRules:
             })
 
         # 4. Check for Sitemaps
-        if any(u.endswith("sitemap.xml") or "sitemap" in u.lower() for u in sample_urls):
+        if any(u.endswith("sitemap.xml") or "sitemap" in u.lower() for u in sanitized_samples):
             candidates.append({
                 "profile": "sitemap",
                 "confidence": 0.99,
@@ -89,7 +95,7 @@ class ScrapingRules:
             })
 
         # 5. Check for Feeds (RSS/Atom)
-        if any(any(kw in u.lower() for kw in ["/feed/", "rss.xml", "atom.xml", ".rss", ".atom"]) for u in sample_urls):
+        if any(any(kw in u.lower() for kw in ["/feed/", "rss.xml", "atom.xml", ".rss", ".atom"]) for u in sanitized_samples):
             candidates.append({
                 "profile": "feed",
                 "confidence": 0.95,
@@ -102,7 +108,7 @@ class ScrapingRules:
             "app-root", "hydrated", "ng-app", "pdf-viewer", "document-viewer"
         ]
         has_spa_markers = any(marker in html_lower for marker in spa_indicators)
-        is_sparse_links = len(sample_urls) <= 3
+        is_sparse_links = len(sanitized_samples) <= 3
         
         if has_spa_markers or (is_sparse_links and len(html_lower) > 0):
             candidates.append({
@@ -128,8 +134,8 @@ class ScrapingRules:
 
         # 8. Check for Asset / File Repositories
         asset_extensions = {".pdf", ".zip", ".tar", ".gz", ".rar", ".7z", ".png", ".jpg", ".jpeg"}
-        asset_matches = sum(1 for u in sample_urls if URL(u).suffix.lower() in asset_extensions or "download" in u.lower())
-        if (sample_urls and asset_matches / max(len(sample_urls), 1) > 0.3) or "pdf" in html_lower or "download" in html_lower:
+        asset_matches = sum(1 for u in sanitized_samples if URL(u).suffix.lower() in asset_extensions or "download" in u.lower())
+        if (sanitized_samples and asset_matches / max(len(sanitized_samples), 1) > 0.3) or "pdf" in html_lower or "download" in html_lower:
             candidates.append({
                 "profile": "asset_index",
                 "confidence": 0.85,
@@ -137,8 +143,8 @@ class ScrapingRules:
             })
 
         # 9. Check for Pagination
-        pagination_count = sum(1 for u in sample_urls if ScrapingRules.is_pagination_url(u))
-        if pagination_count / max(len(sample_urls), 1) > 0.3:
+        pagination_count = sum(1 for u in sanitized_samples if ScrapingRules.is_pagination_url(u))
+        if pagination_count / max(len(sanitized_samples), 1) > 0.3:
             candidates.append({
                 "profile": "flat_paged",
                 "confidence": 0.90,
@@ -146,7 +152,7 @@ class ScrapingRules:
             })
 
         # 10. Check path depth complexity for hierarchy
-        depths = [len(URL(u).path.strip("/").split("/")) for u in sample_urls if URL(u).path]
+        depths = [len(URL(u).path.strip("/").split("/")) for u in sanitized_samples if URL(u).path]
         avg_depth = sum(depths) / len(depths) if depths else 0
         if avg_depth > 2:
             candidates.append({

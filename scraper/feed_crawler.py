@@ -15,6 +15,9 @@ class FeedCrawler(BaseCrawler):
         """
         super().__init__(name="FeedCrawler", max_concurrent=max_concurrent, keyword_filter=keyword_filter)
         self.downloader = UniversalDownloader(max_concurrent=max_concurrent)
+        
+        # Initialize default request headers using case-insensitive mapping
+        self.default_headers["Accept"] = "application/rss+xml, application/atom+xml, application/xml, text/xml, */*"
 
     async def crawl_async(self, start_url: str):
         sanitized_start = self._sanitize_url(start_url)

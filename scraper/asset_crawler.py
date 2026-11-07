@@ -3,16 +3,17 @@ from .base import BaseCrawler
 from pathlib import Path
 from yarl import URL
 from tqdm import tqdm
-from config import DATA_DIR, ScrapingRules
+from config import DATA_DIR
 from parser.html_parser import HTMLDocumentParser
 from scraper.downloader import UniversalDownloader
+from utils import URLUtils
 
 class AssetCrawler(BaseCrawler):
     def __init__(self, max_concurrent: int = 3, keyword_filter: str = None):
         """
         Specialized crawler focused strictly on harvesting binary assets, 
         document repositories, and direct file archives into data/assets/ 
-        using multi-core multiprocessing parsing.
+        using multi-core multiprocessing parsing, leveraging centralized URL sanitization.
         """
         super().__init__(name="AssetCrawler", max_concurrent=max_concurrent, keyword_filter=keyword_filter)
         self.downloader = UniversalDownloader(max_concurrent=max_concurrent)
@@ -20,6 +21,13 @@ class AssetCrawler(BaseCrawler):
         self.asset_output_dir.mkdir(parents=True, exist_ok=True)
         self.visited_urls = set()
         self.visited_assets = set()
+        
+        # Initialize default request headers using case-insensitive mapping
+        self.default_headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
+
+    def _sanitize_url(self, raw_url: str) -> str:
+        """Delegates URL sanitization to the centralized URLUtils utility."""
+        return URLUtils.sanitize_url(raw_url)
 
     def _get_asset_path(self, start_url: str, current_url: str) -> Path:
         """
@@ -89,7 +97,7 @@ class AssetCrawler(BaseCrawler):
             for url, has_keyword, nav_links, asset_urls in parallel_results:
                 # Process binary assets found on root page
                 for clean_target in asset_urls:
-                    if ScrapingRules.is_high_risk_url(clean_target):
+                    if HTMLDocumentParser.is_high_risk_url(clean_target):
                         continue
                     if clean_target not in self.visited_assets:
                         self.visited_assets.add(clean_target)
@@ -99,7 +107,7 @@ class AssetCrawler(BaseCrawler):
 
                 # Process sub-index navigation pages for further discovery
                 for clean_target in nav_links:
-                    if ScrapingRules.is_high_risk_url(clean_target):
+                    if HTMLDocumentParser.is_high_risk_url(clean_target):
                         continue
                     if clean_target not in discovered_links:
                         discovered_links.add(clean_target)
@@ -132,7 +140,7 @@ class AssetCrawler(BaseCrawler):
 
                 for url, has_keyword, nav_links, asset_urls in sub_parallel_results:
                     for clean_target in asset_urls:
-                        if ScrapingRules.is_high_risk_url(clean_target):
+                        if HTMLDocumentParser.is_high_risk_url(clean_target):
                             continue
                         if clean_target not in self.visited_assets:
                             self.visited_assets.add(clean_target)
