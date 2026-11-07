@@ -14,6 +14,7 @@ from utils.history import load_url_history, save_url_to_history
 from utils.clean_dirs import clean_empty_directories
 from utils.reset_system import reset_system
 from utils.stitch_pdf import stitch_images_to_pdf
+from utils.document_processor import process_pdf_to_structured_data
 from utils import URLUtils
 
 
@@ -126,13 +127,14 @@ def interactive_menu():
         print(" [1] Scrape Target Website (Smart Dispatcher & Multi-Crawler)")
         print(" [2] Harvest Local Assets & Images")
         print(" [3] Stitch Downloaded Tiles into PDF")
-        print(" [4] Run Local Storage Diagnostics")
-        print(" [5] Clean Empty Nested Directories")
-        print(" [6] Full System Reset (Wipe Data Directory)")
-        print(" [7] Exit")
+        print(" [4] Reformat Master PDF (Extract Text, PNGs & Structured JSON)")
+        print(" [5] Run Local Storage Diagnostics")
+        print(" [6] Clean Empty Nested Directories")
+        print(" [7] Full System Reset (Wipe Data Directory)")
+        print(" [8] Exit")
         print("----------------------------------------")
         
-        choice = input("Select an option (1-7): ").strip()
+        choice = input("Select an option (1-8): ").strip()
         
         if choice == "1":
             run_scraper_flow()
@@ -155,8 +157,35 @@ def interactive_menu():
             except Exception as e:
                 print(f"\n[!] ERROR in PDF Stitcher: {type(e).__name__} - {e}")
                 traceback.print_exc()
-            
+
         elif choice == "4":
+            print("\n[*] Running Document Reformatting & Parsing Utility...")
+            pdf_dir = DATA_DIR / "pdf"
+            if not pdf_dir.exists():
+                print("[!] No PDFs found in data/pdf/. Stitch a PDF first.")
+            else:
+                pdfs = list(pdf_dir.glob("*.pdf"))
+                if not pdfs:
+                    print("[!] No PDF files available in data/pdf/.")
+                else:
+                    print("\n========================================")
+                    print("         SELECT PDF TO REFORMAT         ")
+                    print("========================================")
+                    for idx, p in enumerate(pdfs, 1):
+                        print(f"  [{idx}] {p.name}")
+                    print("----------------------------------------")
+                    try:
+                        p_choice = input("Select PDF number: ").strip()
+                        if p_choice.isdigit() and 1 <= int(p_choice) <= len(pdfs):
+                            selected_pdf = pdfs[int(p_choice) - 1]
+                            process_pdf_to_structured_data(str(selected_pdf))
+                        else:
+                            print("[!] Invalid selection.")
+                    except Exception as e:
+                        print(f"\n[!] ERROR in Document Reformatting: {type(e).__name__} - {e}")
+                        traceback.print_exc()
+            
+        elif choice == "5":
             print("\n[*] Running local storage diagnostics verifier...")
             try:
                 run_verification()
@@ -164,7 +193,7 @@ def interactive_menu():
                 print(f"\n[!] ERROR in Verification Diagnostics: {type(e).__name__} - {e}")
                 traceback.print_exc()
                 
-        elif choice == "5":
+        elif choice == "6":
             print("\n[*] Running empty directory cleanup utility...")
             try:
                 clean_empty_directories()
@@ -172,7 +201,7 @@ def interactive_menu():
                 print(f"\n[!] ERROR in Directory Cleaner: {type(e).__name__} - {e}")
                 traceback.print_exc()
 
-        elif choice == "6":
+        elif choice == "7":
             print("\n[*] Running system reset utility...")
             try:
                 reset_system()
@@ -180,12 +209,12 @@ def interactive_menu():
                 print(f"\n[!] ERROR in System Reset: {type(e).__name__} - {e}")
                 traceback.print_exc()
                 
-        elif choice == "7":
+        elif choice == "8":
             print("[*] Exiting pipeline hub. Goodbye!")
             sys.exit(0)
             
         else:
-            print("[!] Invalid choice. Please enter a number between 1 and 7.")
+            print("[!] Invalid choice. Please enter a number between 1 and 8.")
 
 
 def main():
@@ -217,6 +246,7 @@ def main():
     parser.add_argument("--parse-images", action="store_true", help="Run asset harvesting on local HTML files")
     parser.add_argument("--base-url", type=str, default="", help="Base URL for resolving relative asset links")
     parser.add_argument("--stitch-pdf", action="store_true", help="Stitch downloaded page tiles into a master PDF")
+    parser.add_argument("--reformat-pdf", type=str, default=None, help="Path to master PDF for structured reformatting")
     parser.add_argument("--verify", action="store_true", help="Run local storage and file diagnostics")
     parser.add_argument("--reset-system", action="store_true", help="Wipe local data and asset directories")
     parser.add_argument("--clean-dirs", action="store_true", help="Prune empty nested skeleton directories")
@@ -240,6 +270,8 @@ def main():
         harvest_assets(base_url=sanitized_base_url)
     elif args.stitch_pdf:
         stitch_images_to_pdf()
+    elif args.reformat_pdf:
+        process_pdf_to_structured_data(args.reformat_pdf)
     elif args.verify:
         run_verification()
     elif args.reset_system:
