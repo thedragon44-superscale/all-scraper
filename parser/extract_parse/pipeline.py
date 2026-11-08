@@ -7,6 +7,12 @@ from .layout_cropper import LayoutCropper
 from .text_analyzer import TextAnalyzer
 from .schema_mapper import SchemaMapper
 
+try:
+    import fitz  # PyMuPDF
+    PYMUPDF_AVAILABLE = True
+except ImportError:
+    PYMUPDF_AVAILABLE = False
+
 
 class DocumentPipeline:
     def __init__(self, output_dir: str | Path):
@@ -102,7 +108,7 @@ class DocumentPipeline:
 
     @classmethod
     def interactive_run(cls):
-        """Scans the `pdf/` folder for available document folders or files to choose from, and executes the pipeline."""
+        """Scans the `pdf/` folder, lets the user select a target, customize the output folder name under `data/parsed_data`, renders/gathers images, and executes the pipeline."""
         print("\n========================================")
         print("     MASTER REFORMATTING & PARSING      ")
         print("========================================")
@@ -112,7 +118,6 @@ class DocumentPipeline:
             print("[!] Root 'pdf/' directory not found.")
             return
 
-        # Gather subdirectories and files in pdf/
         subdirs = sorted([d for d in pdf_root.iterdir() if d.is_dir() and not d.name.startswith('.')])
         pdfs = sorted(list(pdf_root.glob("*.pdf")))
         all_targets = subdirs + pdfs
@@ -133,40 +138,87 @@ class DocumentPipeline:
             return
 
         selected_target = all_targets[int(choice) - 1]
-        
-        # Determine where the page images are
-        image_dir = selected_target
-        if selected_target.is_dir():
-            if (selected_target / "images").exists() and (selected_target / "images").is_dir():
-                image_dir = selected_target / "images"
+        default_folder_name = selected_target.stem if selected_target.is_file() else selected_target.name
 
-        page_images = sorted(list(image_dir.glob("page_*.png")))
-        if not page_images:
-            page_images = sorted(list(image_dir.glob("*.png")))
-
-        if not page_images:
-            print(f"[!] No page images found in {image_dir}")
+        try:
+            custom_name = input(f"Enter custom output folder name inside 'data/parsed_data' [default: {default_folder_name}]: ").strip()
+            if custom_name:
+                default_folder_name = custom_name
+        except (EOFError, KeyboardInterrupt):
+            print("\n[*] Operation cancelled.")
             return
 
-        doc_name = selected_target.stem if selected_target.is_file() else selected_target.name
-        output_dir = Path("data/output") / doc_name
+        # Strictly structured paths inside data/parsed_data
+        out_dir = Path("data") / "parsed_data" / default_folder_name
+        img_dir = out_dir / "images"
+        
+        out_dir.mkdir(parents=True, exist_ok=True)
+        img_dir.mkdir(parents=True, exist_ok=True)
 
-        print(f"\n[*] Processing {len(page_images)} pages for document '{doc_name}'...")
-        print(f"[*] Output schema and cropped figures will be saved to: {output_dir}")
+        page_images = []
 
-        pipeline = cls(output_dir=output_dir)
+        if selected_target.is_dir():
+            image_extensions = {".png", ".jpg", ".jpeg", ".webp"}
+            page_images = sorted([p for p in selected_target.iterdir() if p.suffix.lower() in image_extensions])
+            
+            if not page_images and (selected_target / "images").exists():
+                page_images = sorted([p for p in (selected_target / "images").iterdir() if p.suffix.lower() in image_extensions])
+
+            if not page_images:
+                sub_pdfs = list(selected_target.glob("*.pdf"))
+                if sub_pdfs and PYMUPDF_AVAILABLE:
+                    print(f"[*] Found PDF inside directory, rendering pages to images...")
+                    doc = fitz.open(str(sub_pdfs[0]))
+                    for idx, page in enumerate(doc, 1):
+                        pix = page.get_pixmap()
+                        img_path = img_dir / f"page_{idx:03d}.png"
+                        pix.save(str(img_path))
+                        page_images.append(img_path)
+        elif selected_target.is_file() and selected_target.suffix.lower() == ".pdf" and PYMUPDF_AVAILABLE:
+            print(f"[*] Rendering PDF pages to images...")
+            doc = fitz.open(str(selected_target))
+            for idx, page in enumerate(doc, 1):
+                pix = page.get_pixmap()
+                img_path = img_dir / f"page_{idx:03d}.png"
+                pix.save(str(img_path))
+                page_images.append(img_path)
+
+        if not page_images:
+            print(f"[!] No valid page images or documents found for {selected_target.name}")
+            return
+
+        print(f"\n[*] Processing {len(page_images)} pages for '{default_folder_name}'...")
+        print(f"[*] Output directory: {out_dir.resolve()}")
+
+        pipeline = cls(output_dir=out_dir)
+        
+        # Run text extraction, figure cropping, and analysis
         schema_result = pipeline.process_document(
-            document_name=doc_name,
+            document_name=default_folder_name,
             page_images=page_images,
             page_layouts=None
         )
 
-        # Save validated schema JSON
-        output_json_path = output_dir / f"{doc_name}_schema.json"
-        output_json_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_json_path, "w", encoding="utf-8") as f:
+        # Build full text accumulator
+        full_text_accumulator = []
+        for idx, img_path in enumerate(page_images, 1):
+            try:
+                ocr_data = pipeline.ocr_engine.extract_page_data(img_path)
+                page_text = " ".join([b.get("text_content", "") for b in ocr_data.get("text_blocks", [])])
+                full_text_accumulator.append(f"--- PAGE {idx} ---\n{page_text}")
+            except Exception:
+                pass
+
+        # Save standard outputs
+        txt_output_path = out_dir / "text.txt"
+        txt_output_path.write_text("\n\n".join(full_text_accumulator), encoding="utf-8")
+
+        json_output_path = out_dir / "json_schema.json"
+        with open(json_output_path, "w", encoding="utf-8") as f:
             json.dump(schema_result, f, indent=2, ensure_ascii=False)
 
-        print(f"\n[Success] Master reformatting complete!")
-        print(f"[+] Validated JSON Schema saved to: {output_json_path}")
-        print(f"[+] Cropped figures saved to: {pipeline.figures_dir}")
+        print(f"\n[+] Processing Complete!")
+        print(f"    - Output Folder:  {out_dir.resolve()}")
+        print(f"    - Text File:      {txt_output_path.name}")
+        print(f"    - JSON Schema:    {json_output_path.name}")
+        print(f"    - Cropped Figures: {pipeline.figures_dir.resolve()}")

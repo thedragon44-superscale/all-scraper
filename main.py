@@ -238,7 +238,13 @@ def interactive_menu():
                 traceback.print_exc()
 
         elif choice == "4":
-            handle_master_reformatting()
+            print("\n[*] Running Advanced Document Reformatting & Parsing Pipeline...")
+            try:
+                from parser.extract_parse.pipeline import DocumentPipeline
+                DocumentPipeline.interactive_run()
+            except Exception as e:
+                print(f"\n[!] ERROR in Document Reformatting: {type(e).__name__} - {e}")
+                traceback.print_exc()
             
         elif choice == "5":
             print("\n[*] Running local storage diagnostics verifier...")
