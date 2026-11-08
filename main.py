@@ -15,7 +15,7 @@ from utils.clean_dirs import clean_empty_directories
 from utils.reset_system import reset_system
 from utils.stitch_pdf import stitch_images_to_pdf
 from utils import URLUtils
-from extract_parse import ExtractParseEngine
+from parser.extract_parse import ExtractParseEngine
 
 
 PROFILE_CHOICES = [
