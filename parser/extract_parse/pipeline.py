@@ -1,11 +1,21 @@
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import json
+import logging
+from tqdm import tqdm
 
 from .ocr_engine import OCREngine
 from .layout_cropper import LayoutCropper
 from .text_analyzer import TextAnalyzer
 from .schema_mapper import SchemaMapper
+
+# Configure event logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S"
+)
+logger = logging.getLogger("DocumentPipeline")
 
 try:
     import fitz  # PyMuPDF
@@ -31,61 +41,69 @@ class DocumentPipeline:
         page_layouts: Optional[Dict[int, List[Tuple[int, int, int, int]]]] = None
     ) -> Dict[str, Any]:
         """
-        Processes a full multi-page document, extracting text, cropping figures,
-        analyzing content, and building the validated JSON schema.
+        Processes a full multi-page document with real-time progress bar and event logging,
+        extracting text, cropping figures, analyzing content, and building the validated JSON schema.
         """
         page_layouts = page_layouts or {}
         total_pages = len(page_images)
         mapper = SchemaMapper(document_name=document_name, total_pages=total_pages)
 
-        for idx, img_path in enumerate(page_images, start=1):
-            path = Path(img_path)
-            
-            # 1. Extract text blocks and dimensions via OCR
-            try:
-                ocr_result = self.ocr_engine.extract_page_data(path)
-                page_dimensions = ocr_result["page_dimensions"]
-                text_blocks = ocr_result["text_blocks"]
-            except Exception:
-                page_dimensions = {"width": 1280, "height": 1024}
-                text_blocks = []
+        logger.info(f"Starting document pipeline for '{document_name}' ({total_pages} pages total).")
 
-            # 2. Crop figures if layout bounding boxes are provided for this page
-            boxes = page_layouts.get(idx, [])
-            figure_blocks = []
-            if boxes:
+        # Wrap page iteration with tqdm progress bar
+        with tqdm(enumerate(page_images, start=1), total=total_pages, desc=f"Parsing {document_name}", unit="page") as pbar:
+            for idx, img_path in pbar:
+                path = Path(img_path)
+                pbar.set_postfix(page=f"{idx}/{total_pages}")
+
+                # 1. Extract text blocks and dimensions via OCR
                 try:
-                    raw_figures = self.cropper.process_page_layouts(
-                        image_path=path,
-                        page_number=idx,
-                        layout_boxes=boxes
-                    )
-                    
-                    for fig in raw_figures:
-                        matched_caption_id = self._find_associated_caption(fig["spatial_coordinates"], text_blocks)
-                        fig_entry = {
-                            "figure_id": fig["figure_id"],
-                            "image_file_path": fig["image_file_path"],
-                            "spatial_coordinates": fig["spatial_coordinates"],
-                            "dimensions": fig["dimensions"],
-                            "associated_caption_id": matched_caption_id
-                        }
-                        figure_blocks.append(fig_entry)
-                except Exception:
-                    pass
+                    ocr_result = self.ocr_engine.extract_page_data(path)
+                    page_dimensions = ocr_result["page_dimensions"]
+                    text_blocks = ocr_result["text_blocks"]
+                except Exception as e:
+                    logger.warning(f"OCR extraction failed on page {idx}: {e}")
+                    page_dimensions = {"width": 1280, "height": 1024}
+                    text_blocks = []
 
-            # 3. Run NLP semantic analysis on text blocks
-            analysis_metadata = self.analyzer.analyze_page(text_blocks)
+                # 2. Crop figures if layout bounding boxes are provided for this page
+                boxes = page_layouts.get(idx, [])
+                figure_blocks = []
+                if boxes:
+                    try:
+                        raw_figures = self.cropper.process_page_layouts(
+                            image_path=path,
+                            page_number=idx,
+                            layout_boxes=boxes
+                        )
+                        
+                        for fig in raw_figures:
+                            matched_caption_id = self._find_associated_caption(fig["spatial_coordinates"], text_blocks)
+                            fig_entry = {
+                                "figure_id": fig["figure_id"],
+                                "image_file_path": fig["image_file_path"],
+                                "spatial_coordinates": fig["spatial_coordinates"],
+                                "dimensions": fig["dimensions"],
+                                "associated_caption_id": matched_caption_id
+                            }
+                            figure_blocks.append(fig_entry)
+                        logger.debug(f"Cropped {len(raw_figures)} figures on page {idx}.")
+                    except Exception as e:
+                        logger.warning(f"Figure cropping failed on page {idx}: {e}")
 
-            # 4. Add page data to SchemaMapper
-            mapper.add_page_data(
-                page_number=idx,
-                page_dimensions=page_dimensions,
-                text_blocks=text_blocks,
-                figure_blocks=figure_blocks,
-                analysis_metadata=analysis_metadata
-            )
+                # 3. Run NLP semantic analysis on text blocks
+                analysis_metadata = self.analyzer.analyze_page(text_blocks)
 
+                # 4. Add page data to SchemaMapper
+                mapper.add_page_data(
+                    page_number=idx,
+                    page_dimensions=page_dimensions,
+                    text_blocks=text_blocks,
+                    figure_blocks=figure_blocks,
+                    analysis_metadata=analysis_metadata
+                )
+
+        logger.info(f"Successfully compiled all pages for '{document_name}'. Building schema...")
         return mapper.build_document_schema()
 
     def _find_associated_caption(self, fig_coords: List[int], text_blocks: List[Dict[str, Any]]) -> Optional[str]:
@@ -108,7 +126,7 @@ class DocumentPipeline:
 
     @classmethod
     def interactive_run(cls):
-        """Scans the `pdf/` folder, lets the user select a target, customize the output folder name under `data/parsed_data`, renders/gathers images, and executes the pipeline."""
+        """Scans the `pdf/` folder, lets the user select a target, customize the output folder name, renders/gathers images, and executes the pipeline."""
         print("\n========================================")
         print("     MASTER REFORMATTING & PARSING      ")
         print("========================================")
@@ -148,7 +166,6 @@ class DocumentPipeline:
             print("\n[*] Operation cancelled.")
             return
 
-        # Strictly structured paths inside data/parsed_data
         out_dir = Path("data") / "parsed_data" / default_folder_name
         img_dir = out_dir / "images"
         
@@ -192,7 +209,7 @@ class DocumentPipeline:
 
         pipeline = cls(output_dir=out_dir)
         
-        # Run text extraction, figure cropping, and analysis
+        # Run text extraction, figure cropping, and analysis with progress bar
         schema_result = pipeline.process_document(
             document_name=default_folder_name,
             page_images=page_images,
