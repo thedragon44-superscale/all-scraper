@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from .ocr_engine import OCREngine
 from .text_analyzer import TextAnalyzer
 from .schema_mapper import SchemaMapper, DocumentSchemaModel
+from .geometry_utils import GeometryUtils
 from .layout_cropper import LayoutCropper
 from .pipeline import DocumentPipeline
 
@@ -107,6 +108,7 @@ __all__ = [
     "OCREngine",
     "TextAnalyzer",
     "SchemaMapper",
+    "GeometryUtils",
     "LayoutCropper",
     "DocumentPipeline",
 ]

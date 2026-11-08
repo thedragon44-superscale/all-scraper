@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import json
 import logging
 from tqdm import tqdm
+from tqdm.contrib.logging import logging_redirect_tqdm
 
 from .ocr_engine import OCREngine
 from .layout_cropper import LayoutCropper
@@ -50,58 +51,59 @@ class DocumentPipeline:
 
         logger.info(f"Starting document pipeline for '{document_name}' ({total_pages} pages total).")
 
-        # Wrap page iteration with tqdm progress bar
-        with tqdm(enumerate(page_images, start=1), total=total_pages, desc=f"Parsing {document_name}", unit="page") as pbar:
-            for idx, img_path in pbar:
-                path = Path(img_path)
-                pbar.set_postfix(page=f"{idx}/{total_pages}")
+        # Use logging_redirect_tqdm to safely route event logs above the active progress bar without visual overlap
+        with logging_redirect_tqdm():
+            with tqdm(enumerate(page_images, start=1), total=total_pages, desc=f"Parsing {document_name}", unit="page") as pbar:
+                for idx, img_path in pbar:
+                    path = Path(img_path)
+                    pbar.set_postfix(page=f"{idx}/{total_pages}")
 
-                # 1. Extract text blocks and dimensions via OCR
-                try:
-                    ocr_result = self.ocr_engine.extract_page_data(path)
-                    page_dimensions = ocr_result["page_dimensions"]
-                    text_blocks = ocr_result["text_blocks"]
-                except Exception as e:
-                    logger.warning(f"OCR extraction failed on page {idx}: {e}")
-                    page_dimensions = {"width": 1280, "height": 1024}
-                    text_blocks = []
-
-                # 2. Crop figures and tables if layout bounding boxes are provided for this page
-                boxes = page_layouts.get(idx, [])
-                figure_blocks = []
-                if boxes:
+                    # 1. Extract text blocks and dimensions via OCR
                     try:
-                        raw_figures = self.cropper.process_page_layouts(
-                            image_path=path,
-                            page_number=idx,
-                            layout_boxes=boxes
-                        )
-                        
-                        for fig in raw_figures:
-                            matched_caption_id = self._find_associated_caption(fig["spatial_coordinates"], text_blocks)
-                            fig_entry = {
-                                "figure_id": fig["figure_id"],
-                                "image_file_path": fig["image_file_path"],
-                                "spatial_coordinates": fig["spatial_coordinates"],
-                                "dimensions": fig["dimensions"],
-                                "associated_caption_id": matched_caption_id
-                            }
-                            figure_blocks.append(fig_entry)
-                        logger.debug(f"Cropped {len(raw_figures)} figures/tables on page {idx}.")
+                        ocr_result = self.ocr_engine.extract_page_data(path)
+                        page_dimensions = ocr_result["page_dimensions"]
+                        text_blocks = ocr_result["text_blocks"]
                     except Exception as e:
-                        logger.warning(f"Figure/table cropping failed on page {idx}: {e}")
+                        logger.warning(f"OCR extraction failed on page {idx}: {e}")
+                        page_dimensions = {"width": 1280, "height": 1024}
+                        text_blocks = []
 
-                # 3. Run NLP semantic analysis on text blocks
-                analysis_metadata = self.analyzer.analyze_page(text_blocks)
+                    # 2. Crop figures and tables if layout bounding boxes are provided for this page
+                    boxes = page_layouts.get(idx, [])
+                    figure_blocks = []
+                    if boxes:
+                        try:
+                            raw_figures = self.cropper.process_page_layouts(
+                                image_path=path,
+                                page_number=idx,
+                                layout_boxes=boxes
+                            )
+                            
+                            for fig in raw_figures:
+                                matched_caption_id = self._find_associated_caption(fig["spatial_coordinates"], text_blocks)
+                                fig_entry = {
+                                    "figure_id": fig["figure_id"],
+                                    "image_file_path": fig["image_file_path"],
+                                    "spatial_coordinates": fig["spatial_coordinates"],
+                                    "dimensions": fig["dimensions"],
+                                    "associated_caption_id": matched_caption_id
+                                }
+                                figure_blocks.append(fig_entry)
+                            logger.debug(f"Cropped {len(raw_figures)} figures/tables on page {idx}.")
+                        except Exception as e:
+                            logger.warning(f"Figure/table cropping failed on page {idx}: {e}")
 
-                # 4. Add page data to SchemaMapper
-                mapper.add_page_data(
-                    page_number=idx,
-                    page_dimensions=page_dimensions,
-                    text_blocks=text_blocks,
-                    figure_blocks=figure_blocks,
-                    analysis_metadata=analysis_metadata
-                )
+                    # 3. Run NLP semantic analysis on text blocks
+                    analysis_metadata = self.analyzer.analyze_page(text_blocks)
+
+                    # 4. Add page data to SchemaMapper
+                    mapper.add_page_data(
+                        page_number=idx,
+                        page_dimensions=page_dimensions,
+                        text_blocks=text_blocks,
+                        figure_blocks=figure_blocks,
+                        analysis_metadata=analysis_metadata
+                    )
 
         logger.info(f"Successfully compiled all pages for '{document_name}'. Building schema...")
         return mapper.build_document_schema()
@@ -126,7 +128,7 @@ class DocumentPipeline:
 
     @classmethod
     def interactive_run(cls):
-        """Scans the `pdf/` folder, lets the user select a target, extracts filtered layout boxes via LayoutCropper, and executes the pipeline."""
+        """Scans the `pdf/` folder, lets the user select a target, extracts geometry-validated layout boxes via LayoutCropper, and executes the pipeline."""
         print("\n========================================")
         print("     MASTER REFORMATTING & PARSING      ")
         print("========================================")
@@ -213,10 +215,10 @@ class DocumentPipeline:
 
         pipeline = cls(output_dir=out_dir)
         
-        # Extract layout and table boxes automatically via the LayoutCropper module if a source PDF exists
+        # Extract layout and table boxes automatically via the LayoutCropper module (backed by GeometryUtils) if a source PDF exists
         page_layouts = {}
         if target_pdf_path:
-            print(f"[*] Extracting layout figure & table boundaries via LayoutCropper...")
+            print(f"[*] Extracting geometry-validated figure & table boundaries via LayoutCropper...")
             page_layouts = pipeline.cropper.extract_layout_boxes(target_pdf_path)
 
         # Run text extraction, figure cropping, and analysis with progress bar
