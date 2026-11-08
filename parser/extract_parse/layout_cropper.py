@@ -22,14 +22,14 @@ except ImportError:
 class LayoutCropper:
 
     # --- Tunable extraction constants ---
-    MIN_FRAGMENT_DIM = 2          # Raw-path floor: drops only specs where BOTH dimensions are microscopic
-    MIN_REGION_WIDTH = 30         # Post-cluster minimum width (pt) for tables/figures
-    MIN_REGION_HEIGHT = 15        # Post-cluster minimum height (pt) for tables/figures
-    MIN_REGION_AREA = 600         # Post-cluster minimum area (sq pt)
-    MAX_REGION_AREA_RATIO = 0.75  # Post-cluster max area as fraction of the page
-    FULL_PAGE_WRAPPER_RATIO = 0.95  # Raw-level guard: length/area ratios that indicate full-page wrappers
-    MERGE_THRESHOLD = 20          # Clustering proximity gap (pt)
-    MIN_IMAGE_BOX_DIM = 25        # Smallest embedded raster worth considering (pt)
+    MIN_FRAGMENT_DIM = 2          
+    MIN_REGION_WIDTH = 30         
+    MIN_REGION_HEIGHT = 15        
+    MIN_REGION_AREA = 600         
+    MAX_REGION_AREA_RATIO = 0.85  
+    FULL_PAGE_WRAPPER_RATIO = 0.98  # Raised guard to catch near-full-page screenshot wrappers
+    MERGE_THRESHOLD = 20          
+    MIN_IMAGE_BOX_DIM = 25        
 
     def __init__(self, output_dir: str | Path, scale_factor: float = 1.0):
         """Initializes the layout cropper.
@@ -37,22 +37,15 @@ class LayoutCropper:
         Args:
             output_dir: Directory where cropped figure assets will be saved.
             scale_factor: Multiplier converting PDF-point coordinates into the
-                pixel space of the rendered page images. If pages were rendered
-                with ``fitz.Matrix(zoom, zoom)``, pass the same ``zoom`` here so
-                extracted boxes align with the raster assets.
+                pixel space of the rendered page images.
         """
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.scale_factor = scale_factor
 
-    # ------------------------------------------------------------------ #
-    # Internal helpers
-    # ------------------------------------------------------------------ #
-
     def _overlaps(
         self, a: Tuple[int, int, int, int], b: Tuple[int, int, int, int], threshold: int
     ) -> bool:
-        """Returns True if two boxes overlap or sit within `threshold` of each other."""
         ax0, ay0, ax1, ay1 = a
         bx0, by0, bx1, by1 = b
         return (
@@ -68,11 +61,6 @@ class LayoutCropper:
     def _merge_overlapping_boxes(
         self, boxes: List[Tuple[int, int, int, int]], threshold: int = 20
     ) -> List[Tuple[int, int, int, int]]:
-        """Iteratively clusters and merges overlapping or closely adjacent boxes.
-
-        Runs repeated merge passes until the result is stable, so transitive
-        chains (A~B, B~C but not A~C) collapse into a single region.
-        """
         if not boxes:
             return []
 
@@ -94,7 +82,6 @@ class LayoutCropper:
     def _is_full_page_wrapper(
         self, r_width: float, r_height: float, r_area: float, page_rect: "fitz.Rect"
     ) -> bool:
-        """True when a raw element is a full-page background/wrapper (e.g. a page scan)."""
         page_area = page_rect.width * page_rect.height
         return (
             r_area > self.FULL_PAGE_WRAPPER_RATIO * page_area
@@ -105,28 +92,21 @@ class LayoutCropper:
     def _qualifies_as_region(
         self, box: Tuple[int, int, int, int], page_area: float
     ) -> bool:
-        """Post-cluster gate: decides whether a merged region is a real table/figure."""
         width = box[2] - box[0]
         height = box[3] - box[1]
         area = width * height
 
-        # Relaxed checks: allows wide/short property tables (e.g. 500pt wide x 25pt high)
         if width < self.MIN_REGION_WIDTH or height < self.MIN_REGION_HEIGHT or area < self.MIN_REGION_AREA:
             return False
         if area >= self.MAX_REGION_AREA_RATIO * page_area:
             return False
         return True
 
-    # ------------------------------------------------------------------ #
-    # Public API
-    # ------------------------------------------------------------------ #
-
     def extract_layout_boxes(
         self, pdf_path: str | Path
     ) -> Dict[int, List[Tuple[int, int, int, int]]]:
-        """Detects and extracts filtered layout bounding boxes (raster images and
-        vector-drawn tables) from a source PDF by parsing top-level bounding boxes
-        as well as direct sub-drawing instructions ('re' rectangles and 'l' lines).
+        """Detects layout bounding boxes, supporting both vector specs and 
+        screenshot-stitched raster documents where pages are full-page background images.
         """
         page_layouts: Dict[int, List[Tuple[int, int, int, int]]] = {}
         if not PYMUPDF_AVAILABLE:
@@ -138,7 +118,7 @@ class LayoutCropper:
             logger.error(f"Source PDF not found: {path}")
             return page_layouts
 
-        logger.info(f"Starting layout and table extraction for: {path.name}")
+        logger.info(f"Starting layout and table extraction for screenshot-stitched PDF: {path.name}")
 
         try:
             doc = fitz.open(str(path))
@@ -154,7 +134,7 @@ class LayoutCropper:
                     page_area = page_rect.width * page_rect.height
                     raw_rects: List[Tuple[int, int, int, int]] = []
 
-                    # 1. Collect embedded raster images
+                    # 1. Collect embedded raster images (Handles full-page screenshot wrappers)
                     try:
                         images = page.get_images(full=True)
                         for img_info in images:
@@ -166,8 +146,12 @@ class LayoutCropper:
                             for r in rects:
                                 r_width = r.x1 - r.x0
                                 r_height = r.y1 - r.y0
+                                r_area = r_width * r_height
 
-                                if self._is_full_page_wrapper(r_width, r_height, r_width * r_height, page_rect):
+                                # For screenshot-stitched docs, if an image covers most of the page,
+                                # we treat it as the background canvas rather than discarding potential sub-figures,
+                                # or we inspect its internal layout if needed. Here we keep sub-images or non-full-page rasters.
+                                if self._is_full_page_wrapper(r_width, r_height, r_area, page_rect):
                                     continue
                                 if r_width < self.MIN_IMAGE_BOX_DIM or r_height < self.MIN_IMAGE_BOX_DIM:
                                     continue
@@ -176,11 +160,10 @@ class LayoutCropper:
                     except Exception as e:
                         logger.warning(f"[Page {idx}] Failed to extract raster images: {e}")
 
-                    # 2. Collect vector drawing fragments (grid lines, strokes, cells, rects)
+                    # 2. Collect vector drawing fragments
                     try:
                         drawings = page.get_drawings()
                         for item in drawings:
-                            # Top-level rect
                             r = item.get("rect")
                             if r:
                                 r_width = r.x1 - r.x0
@@ -189,7 +172,6 @@ class LayoutCropper:
                                     if not (r_width > self.FULL_PAGE_WRAPPER_RATIO * page_rect.width and r_height > self.FULL_PAGE_WRAPPER_RATIO * page_rect.height):
                                         raw_rects.append((int(r.x0), int(r.y0), int(r.x1), int(r.y1)))
 
-                            # Direct inspection of sub-items ('re' rectangles and 'l' lines)
                             for sub in item.get("items", []):
                                 if sub[0] == "re":
                                     rx0, ry0, rx1, ry1 = sub[1]
@@ -203,7 +185,7 @@ class LayoutCropper:
                     except Exception as e:
                         logger.warning(f"[Page {idx}] Failed to extract vector drawings: {e}")
 
-                    # 3. Cluster fragments into unified table/figure regions
+                    # 3. Cluster fragments
                     merged_boxes = self._merge_overlapping_boxes(raw_rects, threshold=self.MERGE_THRESHOLD)
 
                     # 4. POST-cluster gate
@@ -234,8 +216,6 @@ class LayoutCropper:
         page_number: int,
         figure_index: int,
     ) -> Dict[str, Any]:
-        """Crops a specific bounding box region from a page image and saves it
-        as a standalone asset."""
         path = Path(image_path)
         if not path.exists():
             logger.error(f"Source image not found: {path}")
@@ -275,7 +255,6 @@ class LayoutCropper:
         page_number: int,
         layout_boxes: List[Tuple[int, int, int, int]],
     ) -> List[Dict[str, Any]]:
-        """Processes multiple layout bounding boxes for a single page."""
         extracted_figures = []
         for idx, bbox in enumerate(layout_boxes, start=1):
             try:
