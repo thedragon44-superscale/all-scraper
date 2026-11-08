@@ -23,7 +23,9 @@ class LayoutCropper:
 
     # --- Tunable extraction constants ---
     MIN_FRAGMENT_DIM = 2          # Raw-path floor: drops only specs where BOTH dimensions are microscopic
-    MIN_REGION_SIZE = 40          # Post-cluster minimum width/height (pt) for tables/figures
+    MIN_REGION_WIDTH = 30         # Post-cluster minimum width (pt) for tables/figures
+    MIN_REGION_HEIGHT = 15        # Post-cluster minimum height (pt) for tables/figures
+    MIN_REGION_AREA = 600         # Post-cluster minimum area (sq pt)
     MAX_REGION_AREA_RATIO = 0.75  # Post-cluster max area as fraction of the page
     FULL_PAGE_WRAPPER_RATIO = 0.95  # Raw-level guard: length/area ratios that indicate full-page wrappers
     MERGE_THRESHOLD = 20          # Clustering proximity gap (pt)
@@ -108,7 +110,8 @@ class LayoutCropper:
         height = box[3] - box[1]
         area = width * height
 
-        if width < self.MIN_REGION_SIZE or height < self.MIN_REGION_SIZE:
+        # Relaxed checks: allows wide/short property tables (e.g. 500pt wide x 25pt high)
+        if width < self.MIN_REGION_WIDTH or height < self.MIN_REGION_HEIGHT or area < self.MIN_REGION_AREA:
             return False
         if area >= self.MAX_REGION_AREA_RATIO * page_area:
             return False
