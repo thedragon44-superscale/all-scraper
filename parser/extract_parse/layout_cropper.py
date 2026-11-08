@@ -122,11 +122,8 @@ class LayoutCropper:
         self, pdf_path: str | Path
     ) -> Dict[int, List[Tuple[int, int, int, int]]]:
         """Detects and extracts filtered layout bounding boxes (raster images and
-        vector-drawn tables) from a source PDF.
-
-        Raw fragments (grid lines, strokes) are collected permissively using an
-        AND-based size check so that hairline horizontal/vertical rules survive
-        to be clustered into tables.
+        vector-drawn tables) from a source PDF by parsing top-level bounding boxes
+        as well as direct sub-drawing instructions ('re' rectangles and 'l' lines).
         """
         page_layouts: Dict[int, List[Tuple[int, int, int, int]]] = {}
         if not PYMUPDF_AVAILABLE:
@@ -176,27 +173,30 @@ class LayoutCropper:
                     except Exception as e:
                         logger.warning(f"[Page {idx}] Failed to extract raster images: {e}")
 
-                    # 2. Collect vector drawing fragments (grid lines, strokes, cells)
+                    # 2. Collect vector drawing fragments (grid lines, strokes, cells, rects)
                     try:
                         drawings = page.get_drawings()
                         for item in drawings:
+                            # Top-level rect
                             r = item.get("rect")
-                            if not r:
-                                continue
-                            r_width = r.x1 - r.x0
-                            r_height = r.y1 - r.y0
+                            if r:
+                                r_width = r.x1 - r.x0
+                                r_height = r.y1 - r.y0
+                                if not (r_width < self.MIN_FRAGMENT_DIM and r_height < self.MIN_FRAGMENT_DIM):
+                                    if not (r_width > self.FULL_PAGE_WRAPPER_RATIO * page_rect.width and r_height > self.FULL_PAGE_WRAPPER_RATIO * page_rect.height):
+                                        raw_rects.append((int(r.x0), int(r.y0), int(r.x1), int(r.y1)))
 
-                            # FIXED: Use AND instead of OR so long horizontal/vertical
-                            # hairlines aren't mistakenly dropped by their thin dimension.
-                            if r_width < self.MIN_FRAGMENT_DIM and r_height < self.MIN_FRAGMENT_DIM:
-                                continue
+                            # Direct inspection of sub-items ('re' rectangles and 'l' lines)
+                            for sub in item.get("items", []):
+                                if sub[0] == "re":
+                                    rx0, ry0, rx1, ry1 = sub[1]
+                                    raw_rects.append((int(rx0), int(ry0), int(rx1), int(ry1)))
+                                elif sub[0] == "l":
+                                    p1, p2 = sub[1], sub[2]
+                                    lx0, ly0 = min(p1.x, p2.x), min(p1.y, p2.y)
+                                    lx1, ly1 = max(p1.x, p2.x), max(p1.y, p2.y)
+                                    raw_rects.append((int(lx0), int(ly0), int(lx1), int(ly1)))
 
-                            # Guard against literal full-page backgrounds
-                            if r_width > self.FULL_PAGE_WRAPPER_RATIO * page_rect.width and \
-                               r_height > self.FULL_PAGE_WRAPPER_RATIO * page_rect.height:
-                                continue
-
-                            raw_rects.append((int(r.x0), int(r.y0), int(r.x1), int(r.y1)))
                     except Exception as e:
                         logger.warning(f"[Page {idx}] Failed to extract vector drawings: {e}")
 
