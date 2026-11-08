@@ -1,34 +1,44 @@
-"""
-text_analyzer.py
-Module 3: Content Analysis & Semantic "Brain" Layer
-Advanced NLP pipeline utilizing spaCy, YAKE, KeyBERT, and Sumy.
-"""
-
 from collections import Counter
+import logging
 import re
 from typing import Any, Dict, List, Optional
+from tqdm import tqdm
+
+# Configure event logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S"
+)
+logger = logging.getLogger("TextAnalyzer")
 
 # 1. Linguistic Parsing & Named Entity Recognition (spaCy)
 try:
     import spacy
 
     nlp = spacy.load("en_core_web_sm")
+    logger.info("Successfully loaded spaCy NLP model ('en_core_web_sm').")
 except Exception:
     nlp = None
+    logger.warning("spaCy model could not be loaded; falling back to regex tokenization.")
 
 # 2. Keyphrase Extraction (YAKE)
 try:
     import yake
+    logger.info("Successfully initialized YAKE keyword extractor module.")
 except ImportError:
     yake = None
+    logger.warning("YAKE package not found; keyphrase extraction will rely on alternative models.")
 
 # 3. Semantic Keyword Extraction (KeyBERT)
 try:
     from keybert import KeyBERT
 
     kw_model = KeyBERT()
+    logger.info("Successfully initialized KeyBERT semantic keyword extraction model.")
 except Exception:
     kw_model = None
+    logger.warning("KeyBERT model could not be initialized.")
 
 # 4. Extractive Summarization (Sumy)
 try:
@@ -41,8 +51,10 @@ try:
         nltk.data.find("tokenizers/punkt")
     except LookupError:
         nltk.download("punkt", quiet=True)
+    logger.info("Successfully configured Sumy summarization and NLTK dependencies.")
 except ImportError:
     PlaintextParser = None
+    logger.warning("Sumy summarization package not available; using rule-based fallbacks.")
 
 
 class TextAnalyzer:
@@ -91,76 +103,101 @@ class TextAnalyzer:
         else:
             self.yake_extractor = None
 
+        logger.info("TextAnalyzer initialized successfully with custom stop words.")
+
     def analyze_page(self, text_blocks: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Runs multi-stage NLP analysis across page text blocks."""
-        full_text = " ".join(
-            [
-                b.get("text_content", "")
-                for b in text_blocks
-                if b.get("text_content")
-            ]
-        ).strip()
+        """Runs multi-stage NLP analysis across page text blocks with progress tracking."""
+        logger.info(f"Starting multi-stage NLP analysis across {len(text_blocks)} text blocks...")
+        
+        try:
+            full_text = " ".join(
+                [
+                    b.get("text_content", "")
+                    for b in text_blocks
+                    if b.get("text_content")
+                ]
+            ).strip()
 
-        if not full_text:
+            if not full_text:
+                logger.info("Encountered empty or non-textual page content.")
+                return {
+                    "page_topics": [],
+                    "key_concepts": [],
+                    "named_entities": [],
+                    "intent_category": "empty",
+                    "page_summary": "Blank or non-textual page.",
+                    "word_frequencies": {},
+                }
+
+            # Wrap analysis pipeline steps with progress reporting
+            analysis_steps = ["spaCy NLP", "Keyphrases", "Summarization", "Intent"]
+            with tqdm(analysis_steps, desc="Analyzing Page Content", unit="step") as pbar:
+                
+                # Step 1: Named Entity Recognition & Linguistic Filtering via spaCy
+                pbar.set_postfix(step="spaCy NER")
+                entities = []
+                spacy_keywords = []
+                if nlp:
+                    try:
+                        doc = nlp(full_text)
+                        entities = list(
+                            set([ent.text for ent in doc.ents if len(ent.text) > 2])
+                        )
+                        spacy_keywords = [
+                            token.lemma_.lower()
+                            for token in doc
+                            if token.pos_ in ["NOUN", "PROPN"]
+                            and not token.is_stop
+                            and len(token.text) > 2
+                        ]
+                    except Exception:
+                        logger.exception("Error during spaCy document parsing.")
+                pbar.update(1)
+
+                # Step 2: Extract Keyphrases using YAKE & KeyBERT
+                pbar.set_postfix(step="Keyphrases")
+                keyphrases = self._extract_keyphrases(full_text)
+
+                words = (
+                    spacy_keywords
+                    if spacy_keywords
+                    else re.findall(r"\b[A-Za-z]{3,}\b", full_text.lower())
+                )
+                filtered_words = [w for w in words if w not in self.stop_words]
+                word_counts = Counter(filtered_words)
+
+                combined_concepts = list(
+                    dict.fromkeys(
+                        keyphrases + [w for w, _ in word_counts.most_common(5)]
+                    )
+                )
+                pbar.update(1)
+
+                # Step 3: Extractive Summarization
+                pbar.set_postfix(step="Summarization")
+                summary = self._summarize_text(full_text, combined_concepts)
+                pbar.update(1)
+
+                # Step 4: Intent Classification
+                pbar.set_postfix(step="Intent Classification")
+                intent = self._classify_intent(full_text)
+                pbar.update(1)
+
+            logger.info(f"Page text analysis complete. Intent: '{intent}', Concepts identified: {len(combined_concepts)}")
             return {
-                "page_topics": [],
-                "key_concepts": [],
-                "named_entities": [],
-                "intent_category": "empty",
-                "page_summary": "Blank or non-textual page.",
-                "word_frequencies": {},
+                "page_topics": combined_concepts[:5],
+                "key_concepts": combined_concepts,
+                "named_entities": entities,
+                "intent_category": intent,
+                "page_summary": summary,
+                "word_frequencies": dict(word_counts.most_common(10)),
             }
-
-        # Step 1: Named Entity Recognition & Linguistic Filtering via spaCy
-        entities = []
-        spacy_keywords = []
-        if nlp:
-            doc = nlp(full_text)
-            entities = list(
-                set([ent.text for ent in doc.ents if len(ent.text) > 2])
-            )
-            spacy_keywords = [
-                token.lemma_.lower()
-                for token in doc
-                if token.pos_ in ["NOUN", "PROPN"]
-                and not token.is_stop
-                and len(token.text) > 2
-            ]
-
-        # Step 2: Extract Keyphrases using YAKE & KeyBERT
-        keyphrases = self._extract_keyphrases(full_text)
-
-        words = (
-            spacy_keywords
-            if spacy_keywords
-            else re.findall(r"\b[A-Za-z]{3,}\b", full_text.lower())
-        )
-        filtered_words = [w for w in words if w not in self.stop_words]
-        word_counts = Counter(filtered_words)
-
-        combined_concepts = list(
-            dict.fromkeys(
-                keyphrases + [w for w, _ in word_counts.most_common(5)]
-            )
-        )
-
-        # Step 3: Extractive Summarization
-        summary = self._summarize_text(full_text, combined_concepts)
-
-        # Step 4: Intent Classification
-        intent = self._classify_intent(full_text)
-
-        return {
-            "page_topics": combined_concepts[:5],
-            "key_concepts": combined_concepts,
-            "named_entities": entities,
-            "intent_category": intent,
-            "page_summary": summary,
-            "word_frequencies": dict(word_counts.most_common(10)),
-        }
+        except Exception:
+            logger.exception("Critical error during page content analysis pipeline execution.")
+            raise
 
     def _extract_keyphrases(self, text: str) -> List[str]:
-        """Combines KeyBERT and YAKE for multi-word phrase extraction."""
+        """Combines KeyBERT and YAKE for multi-word phrase extraction with stack trace logging."""
         extracted = []
 
         if kw_model:
@@ -173,7 +210,7 @@ class TextAnalyzer:
                 )
                 extracted.extend([kw for kw, score in kb_res])
             except Exception:
-                pass
+                logger.exception("KeyBERT keyword extraction failed.")
 
         if self.yake_extractor:
             try:
@@ -181,12 +218,12 @@ class TextAnalyzer:
                 yake_sorted = sorted(yake_res, key=lambda x: x[1])
                 extracted.extend([kw for kw, score in yake_sorted[:5]])
             except Exception:
-                pass
+                logger.exception("YAKE keyword extraction failed.")
 
         return list(dict.fromkeys(extracted))
 
     def _summarize_text(self, text: str, fallback_concepts: List[str]) -> str:
-        """Generates extractive summary using Sumy."""
+        """Generates extractive summary using Sumy with error stack tracing."""
         if PlaintextParser:
             try:
                 parser = PlaintextParser.from_string(text, Tokenizer("english"))
@@ -196,7 +233,7 @@ class TextAnalyzer:
                 if res:
                     return res
             except Exception:
-                pass
+                logger.exception("Sumy extractive summarization failed; falling back to rule-based summary.")
 
         concepts = (
             ", ".join(fallback_concepts[:3])

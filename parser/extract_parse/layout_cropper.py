@@ -34,24 +34,23 @@ except ImportError:
 
 class LayoutCropper:
 
-    # --- Tunable extraction constants ---
-    MIN_REGION_WIDTH = 40         
-    MIN_REGION_HEIGHT = 20        
-    MIN_REGION_AREA = 800         
-    MAX_REGION_AREA_RATIO = 0.90  
-    MERGE_THRESHOLD = 30          
+    # --- Strict Tunable Extraction Constants ---
+    TOP_MARGIN_EXCLUSION = 120    # Variable 1: Strict pixel cutoff from top to strip browser toolbars/chrome
+    BOTTOM_MARGIN_EXCLUSION = 60  # Strict pixel cutoff from bottom to strip browser status bars
+    MIN_REGION_WIDTH = 120        # Variable 2: Strict minimum width (pt)
+    MIN_REGION_HEIGHT = 70        # Variable 2: Strict minimum height (pt) to prevent single text line slicing
+    MIN_REGION_AREA = 5000        # Variable 2: Strict minimum area (sq pt)
+    MAX_REGION_AREA_RATIO = 0.80  # Max area fraction of the page
+    MERGE_THRESHOLD = 20          # Clustering proximity gap (pt)
+    OPENCV_MIN_BLOCK_AREA = 8000  # Variable 3: Strict OpenCV visual block area filter
+    OCR_ANCHOR_MAX_HEIGHT = 220   # Variable 4: Strict height window for OCR caption anchoring
 
     def __init__(self, output_dir: str | Path, scale_factor: float = 1.0):
-        """Initializes the layout cropper for raster screenshot-stitched PDFs.
-
-        Args:
-            output_dir: Directory where cropped figure assets will be saved.
-            scale_factor: Multiplier converting PDF-point coordinates into the
-                pixel space of the rendered page images.
-        """
+        """Initializes the layout cropper with strict raster validation filters."""
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.scale_factor = scale_factor
+        logger.info("Initialized LayoutCropper with strict extraction thresholds.")
 
     def _overlaps(
         self, a: Tuple[int, int, int, int], b: Tuple[int, int, int, int], threshold: int
@@ -69,7 +68,7 @@ class LayoutCropper:
         return (min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))
 
     def _merge_overlapping_boxes(
-        self, boxes: List[Tuple[int, int, int, int]], threshold: int = 30
+        self, boxes: List[Tuple[int, int, int, int]], threshold: int = 20
     ) -> List[Tuple[int, int, int, int]]:
         if not boxes:
             return []
@@ -90,24 +89,32 @@ class LayoutCropper:
         return current
 
     def _qualifies_as_region(
-        self, box: Tuple[int, int, int, int], page_area: float
+        self, box: Tuple[int, int, int, int], page_rect: "fitz.Rect", page_area: float
     ) -> bool:
-        width = box[2] - box[0]
-        height = box[3] - box[1]
+        """Strict post-cluster validation gate rejecting browser chrome and single-line text."""
+        x0, y0, x1, y1 = box
+        width = x1 - x0
+        height = y1 - y0
         area = width * height
 
+        # 1. Browser Chrome / Margin Exclusion check
+        if y0 < self.TOP_MARGIN_EXCLUSION:
+            return False
+        if y1 > (page_rect.height - self.BOTTOM_MARGIN_EXCLUSION):
+            return False
+
+        # 2. Strict Dimensional & Area gates (prevents text-line slicing)
         if width < self.MIN_REGION_WIDTH or height < self.MIN_REGION_HEIGHT or area < self.MIN_REGION_AREA:
             return False
         if area >= self.MAX_REGION_AREA_RATIO * page_area:
             return False
+
         return True
 
     def _detect_opencv_grid_and_blocks(
         self, page: "fitz.Page", page_rect: "fitz.Rect"
     ) -> List[Tuple[int, int, int, int]]:
-        """Approach 1: OpenCV morphological gridline extraction and contour-based 
-        visual block detection on page bitmap snapshots.
-        """
+        """OpenCV grid extraction and strict visual block filtering."""
         boxes: List[Tuple[int, int, int, int]] = []
         if not OPENCV_AVAILABLE:
             return boxes
@@ -142,28 +149,29 @@ class LayoutCropper:
                 x, y, w, h = cv2.boundingRect(cnt)
                 boxes.append((int(x * inv_scale), int(y * inv_scale), int((x + w) * inv_scale), int((y + h) * inv_scale)))
 
-            # Visual Content Blocks (Diagrams / Illustrations)
+            # Strict Visual Content Blocks (Diagrams)
             kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
             dilated = cv2.dilate(thresh, kernel, iterations=2)
             fig_contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
             for cnt in fig_contours:
                 x, y, w, h = cv2.boundingRect(cnt)
-                if w * h < 3000 or w > page_rect.width * 0.95 or h > page_rect.height * 0.95:
+                # Apply strict OpenCV block area threshold
+                if (w * h * (inv_scale ** 2)) < self.OPENCV_MIN_BLOCK_AREA:
+                    continue
+                if w > page_rect.width * 0.95 or h > page_rect.height * 0.95:
                     continue
                 boxes.append((int(x * inv_scale), int(y * inv_scale), int((x + w) * inv_scale), int((y + h) * inv_scale)))
 
-        except Exception as e:
-            logger.warning(f"OpenCV grid/block detection failed: {e}")
+        except Exception:
+            logger.exception("OpenCV grid and block detection failed.")
 
         return boxes
 
     def _detect_ocr_anchored_regions(
         self, page: "fitz.Page", page_rect: "fitz.Rect"
     ) -> List[Tuple[int, int, int, int]]:
-        """Approach 2: OCR-driven keyword anchoring. Scans page text for caption 
-        markers ('figure', 'table', 'fig.') and defines asset bounding boxes above them.
-        """
+        """Strict OCR keyword anchoring for captions."""
         boxes: List[Tuple[int, int, int, int]] = []
         if not PYTESSERACT_AVAILABLE:
             return boxes
@@ -177,30 +185,27 @@ class LayoutCropper:
             
             for i in range(n_boxes):
                 text = ocr_data["text"][i].strip().lower()
-                if any(kw in text for kw in ["fig", "figure", "table", "diagram", "chart", "illustration"]):
+                if any(kw in text for kw in ["table", "figure", "fig."]):
                     x0 = ocr_data["left"][i]
                     y0 = ocr_data["top"][i]
                     w = ocr_data["width"][i]
                     
-                    # Define an anchor box directly above the caption label
-                    box_x0 = max(10, x0 - 40)
-                    box_x1 = min(int(page_rect.width) - 10, x0 + w + 200)
-                    box_y1 = y0 - 10
-                    box_y0 = max(10, box_y1 - 250)  # Estimated figure/table height window above caption
+                    box_x0 = max(10, x0 - 20)
+                    box_x1 = min(int(page_rect.width) - 10, x0 + w + 150)
+                    box_y1 = max(self.TOP_MARGIN_EXCLUSION, y0 - 10)
+                    box_y0 = max(self.TOP_MARGIN_EXCLUSION, box_y1 - self.OCR_ANCHOR_MAX_HEIGHT)
                     
                     if box_y1 > box_y0:
                         boxes.append((box_x0, box_y0, box_x1, box_y1))
-        except Exception as e:
-            logger.warning(f"OCR keyword anchoring failed: {e}")
+        except Exception:
+            logger.exception("OCR keyword anchoring failed.")
 
         return boxes
 
     def extract_layout_boxes(
         self, pdf_path: str | Path
     ) -> Dict[int, List[Tuple[int, int, int, int]]]:
-        """Extracts table and figure bounding boxes using pure raster processing:
-        combining OpenCV grid/contour detection and OCR-driven keyword anchoring.
-        """
+        """Extracts and strictly filters layout boxes across all pages."""
         page_layouts: Dict[int, List[Tuple[int, int, int, int]]] = {}
         if not PYMUPDF_AVAILABLE:
             logger.error("PyMuPDF (fitz) is not available. Cannot extract layout boxes.")
@@ -211,7 +216,7 @@ class LayoutCropper:
             logger.error(f"Source PDF not found: {path}")
             return page_layouts
 
-        logger.info(f"Starting raster hybrid extraction (OpenCV + OCR Anchoring) for: {path.name}")
+        logger.info(f"Starting strict hybrid layout extraction for: {path.name}")
 
         try:
             doc = fitz.open(str(path))
@@ -227,20 +232,18 @@ class LayoutCropper:
                     page_area = page_rect.width * page_rect.height
                     raw_rects: List[Tuple[int, int, int, int]] = []
 
-                    # 1. OpenCV Grid and Visual Block Detection
-                    cv_rects = self._detect_opencv_grid_and_blocks(page, page_rect)
-                    raw_rects.extend(cv_rects)
+                    # 1. OpenCV Grid and Visual Blocks
+                    raw_rects.extend(self._detect_opencv_grid_and_blocks(page, page_rect))
 
-                    # 2. OCR-Driven Keyword Anchoring
-                    ocr_rects = self._detect_ocr_anchored_regions(page, page_rect)
-                    raw_rects.extend(ocr_rects)
+                    # 2. OCR Anchored Regions
+                    raw_rects.extend(self._detect_ocr_anchored_regions(page, page_rect))
 
-                    # 3. Cluster and merge all detected regions
+                    # 3. Cluster & Merge
                     merged_boxes = self._merge_overlapping_boxes(raw_rects, threshold=self.MERGE_THRESHOLD)
 
-                    # 4. Post-cluster validation gate
+                    # 4. Strict Post-cluster Gate
                     qualified = [
-                        b for b in merged_boxes if self._qualifies_as_region(b, page_area)
+                        b for b in merged_boxes if self._qualifies_as_region(b, page_rect, page_area)
                     ]
 
                     if qualified:
@@ -249,13 +252,11 @@ class LayoutCropper:
                             for b in qualified
                         ]
                         page_layouts[idx] = scaled
-                        logger.info(f"[Page {idx}] Accepted {len(scaled)} layout/table bounding boxes.")
+                        logger.info(f"[Page {idx}] Accepted {len(scaled)} strict layout boxes.")
 
-            logger.info(
-                f"Layout extraction complete: {len(page_layouts)} pages with regions."
-            )
+            logger.info(f"Strict layout extraction complete: {len(page_layouts)} pages with regions.")
         except Exception:
-            logger.exception("Critical error during layout box extraction process.")
+            logger.exception("Critical error during strict layout box extraction.")
 
         return page_layouts
 
@@ -266,6 +267,7 @@ class LayoutCropper:
         page_number: int,
         figure_index: int,
     ) -> Dict[str, Any]:
+        """Crops and saves validated strict region."""
         path = Path(image_path)
         if not path.exists():
             logger.error(f"Source image not found: {path}")
@@ -291,7 +293,7 @@ class LayoutCropper:
         save_path = self.output_dir / file_name
         cropped_image.save(save_path, "PNG")
 
-        logger.debug(f"Saved cropped asset: {save_path.name} (Dims: {crop_width}x{crop_height})")
+        logger.debug(f"Saved strict asset: {save_path.name} (Dims: {crop_width}x{crop_height})")
         return {
             "figure_id": f"fig_{page_number}_{figure_index}",
             "image_file_path": str(save_path.resolve()),
