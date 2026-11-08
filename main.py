@@ -119,30 +119,53 @@ def run_scraper_flow(
 
 
 def handle_master_reformatting():
-    """Handles option 4 for master reformatting using ExtractParseEngine with figure cropping."""
+    """Scans the `pdf/` folder for document folders/files, lets the user choose, and runs extraction & figure cropping."""
     print("\n========================================")
     print("     MASTER REFORMATTING & PARSING      ")
     print("========================================")
     
-    # Target directory where page images (e.g., page_001.png) are stored
-    images_dir_input = input("Enter path to page images directory (e.g., data/parsed_data/emv1-2/images): ").strip()
-    if not images_dir_input:
-        print("[!] No directory provided.")
-        return
-        
-    images_dir = Path(images_dir_input)
-    if not images_dir.exists() or not images_dir.is_dir():
-        print(f"[!] Directory not found: {images_dir}")
+    pdf_root = Path("pdf")
+    if not pdf_root.exists():
+        print("[!] Root 'pdf/' directory not found.")
         return
 
-    page_images = sorted(list(images_dir.glob("page_*.png")))
+    subdirs = sorted([d for d in pdf_root.iterdir() if d.is_dir() and not d.name.startswith('.')])
+    pdfs = sorted(list(pdf_root.glob("*.pdf")))
+    all_targets = subdirs + pdfs
+
+    if not all_targets:
+        print("[!] No folders or PDF files found in root 'pdf/' directory.")
+        return
+
+    print("\nAvailable Document Targets in 'pdf/':")
+    for idx, t in enumerate(all_targets, 1):
+        t_type = "Folder" if t.is_dir() else "PDF"
+        print(f"  [{idx}] {t.name} ({t_type})")
+    print("----------------------------------------")
+
+    choice = input("Select a target number to process: ").strip()
+    if not choice.isdigit() or not (1 <= int(choice) <= len(all_targets)):
+        print("[!] Invalid selection.")
+        return
+
+    selected_target = all_targets[int(choice) - 1]
+    
+    # Resolve image directory (check if 'images' subfolder exists inside the selected directory)
+    image_dir = selected_target
+    if selected_target.is_dir():
+        if (selected_target / "images").exists() and (selected_target / "images").is_dir():
+            image_dir = selected_target / "images"
+
+    page_images = sorted(list(image_dir.glob("page_*.png")))
     if not page_images:
-        print(f"[!] No page images matching 'page_*.png' found in {images_dir}")
+        page_images = sorted(list(image_dir.glob("*.png")))
+
+    if not page_images:
+        print(f"[!] No page images matching 'page_*.png' or '*.png' found in {image_dir}")
         return
 
-    doc_name = input("Enter document name slug (default: 'document'): ").strip() or "document"
-    output_dir_input = input("Enter output directory for structured schema and cropped figures (default: 'data/output'): ").strip() or "data/output"
-    output_dir = Path(output_dir_input)
+    doc_name = selected_target.stem if selected_target.is_file() else selected_target.name
+    output_dir = Path("data/output") / doc_name
     
     print(f"\n[*] Processing {len(page_images)} pages for document '{doc_name}'...")
     print(f"[*] Cropped figures will be saved to: {output_dir / 'cropped_figures'}")
@@ -150,8 +173,6 @@ def handle_master_reformatting():
     try:
         engine = ExtractParseEngine()
         
-        # Optional: You can pass custom layout boxes per page index if available, e.g. {1: [(x0, y0, x1, y1), ...]}
-        # If not supplied, standard OCR text extraction and semantic analysis run across all pages.
         result = engine.process_pages(
             image_paths=page_images,
             document_name=doc_name,
@@ -159,7 +180,6 @@ def handle_master_reformatting():
             page_layouts=None 
         )
         
-        # Save structured JSON schema output
         output_json_path = output_dir / f"{doc_name}_schema.json"
         output_json_path.parent.mkdir(parents=True, exist_ok=True)
         
@@ -169,6 +189,7 @@ def handle_master_reformatting():
             
         print(f"\n[Success] Master reformatting completed successfully!")
         print(f"[+] Validated JSON Schema saved to: {output_json_path}")
+        print(f"[+] Cropped figures saved to: {output_dir / 'cropped_figures'}")
         print(f"[+] Extracted full text accumulator length: {len(result['full_text'])} characters")
 
     except Exception as e:
@@ -308,6 +329,8 @@ def main():
         target_path = Path(args.reformat_pdf)
         if target_path.is_dir():
             page_images = sorted(list(target_path.glob("page_*.png")))
+            if not page_images:
+                page_images = sorted(list(target_path.glob("*.png")))
             engine = ExtractParseEngine()
             result = engine.process_pages(page_images, document_name=target_path.name, image_output_dir=target_path / "cropped_figures")
             print(f"[Success] Processed {len(page_images)} pages from CLI.")
