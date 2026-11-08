@@ -23,7 +23,9 @@ class LayoutCropper:
     def extract_layout_boxes(
         self, pdf_path: str | Path
     ) -> Dict[int, List[Tuple[int, int, int, int]]]:
-        """Detects and extracts embedded image bounding box coordinates from a source PDF document.
+        """Detects and extracts filtered layout bounding boxes (images and vector-drawn tables) 
+
+        from a source PDF document, discarding full-page wrappers.
 
         Args:
             pdf_path: Path to the source PDF file.
@@ -43,12 +45,57 @@ class LayoutCropper:
             doc = fitz.open(str(path))
             for idx, page in enumerate(doc, 1):
                 rects = []
+                page_rect = page.rect
+                page_area = page_rect.width * page_rect.height
+
+                # 1. Extract embedded raster images with size/area filtering
                 for img_info in page.get_images(full=True):
                     xref = img_info[0]
                     for r in page.get_image_rects(xref):
+                        box_width = r.x1 - r.x0
+                        box_height = r.y1 - r.y0
+                        box_area = box_width * box_height
+
+                        # Discard boxes covering > 75% of page area or matching full page dimensions
+                        if box_area > 0.75 * page_area or box_width > 0.95 * page_rect.width or box_height > 0.95 * page_rect.height:
+                            continue
+                        if box_width < 20 or box_height < 20:  # Skip tiny icons/noise artifacts
+                            continue
+
                         rects.append((int(r.x0), int(r.y0), int(r.x1), int(r.y1)))
-                if rects:
-                    page_layouts[idx] = rects
+
+                # 2. Extract vector drawings to detect tables and structured bounding boxes
+                drawings = page.get_drawings()
+                table_rects = []
+                for item in drawings:
+                    if item.get("items"):
+                        for sub in item["items"]:
+                            if sub[0] == "re":  # Rectangle path
+                                rx0, ry0, rx1, ry1 = sub[1]
+                                r_width = rx1 - rx0
+                                r_height = ry1 - ry0
+                                r_area = r_width * r_height
+                                if 0.01 * page_area < r_area < 0.7 * page_area:
+                                    table_rects.append((int(rx0), int(ry0), int(rx1), int(ry1)))
+
+                # Combine, deduplicate, and sort boxes by vertical position
+                combined_boxes = []
+                all_raw_rects = rects + table_rects
+                all_raw_rects.sort(key=lambda b: (b[1], b[0]))
+
+                for box in all_raw_rects:
+                    is_duplicate = False
+                    bx0, by0, bx1, by1 = box
+                    for existing in combined_boxes:
+                        ex0, ey0, ex1, ey1 = existing
+                        if abs(bx0 - ex0) < 10 and abs(by0 - ey0) < 10 and abs(bx1 - ex1) < 10 and abs(by1 - ey1) < 10:
+                            is_duplicate = True
+                            break
+                    if not is_duplicate:
+                        combined_boxes.append(box)
+
+                if combined_boxes:
+                    page_layouts[idx] = combined_boxes
         except Exception:
             pass
 

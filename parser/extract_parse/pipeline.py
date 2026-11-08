@@ -66,7 +66,7 @@ class DocumentPipeline:
                     page_dimensions = {"width": 1280, "height": 1024}
                     text_blocks = []
 
-                # 2. Crop figures if layout bounding boxes are provided for this page
+                # 2. Crop figures and tables if layout bounding boxes are provided for this page
                 boxes = page_layouts.get(idx, [])
                 figure_blocks = []
                 if boxes:
@@ -87,9 +87,9 @@ class DocumentPipeline:
                                 "associated_caption_id": matched_caption_id
                             }
                             figure_blocks.append(fig_entry)
-                        logger.debug(f"Cropped {len(raw_figures)} figures on page {idx}.")
+                        logger.debug(f"Cropped {len(raw_figures)} figures/tables on page {idx}.")
                     except Exception as e:
-                        logger.warning(f"Figure cropping failed on page {idx}: {e}")
+                        logger.warning(f"Figure/table cropping failed on page {idx}: {e}")
 
                 # 3. Run NLP semantic analysis on text blocks
                 analysis_metadata = self.analyzer.analyze_page(text_blocks)
@@ -107,7 +107,7 @@ class DocumentPipeline:
         return mapper.build_document_schema()
 
     def _find_associated_caption(self, fig_coords: List[int], text_blocks: List[Dict[str, Any]]) -> Optional[str]:
-        """Finds the nearest text block directly below or above the figure acting as a caption."""
+        """Finds the nearest text block directly below or above the figure/table acting as a caption."""
         fx0, fy0, fx1, fy1 = fig_coords
         best_block_id = None
         min_distance = float('inf')
@@ -116,7 +116,7 @@ class DocumentPipeline:
             text = block.get("text_content", "").lower()
             if any(kw in text for kw in ["fig", "figure", "diagram", "table", "illustration"]):
                 bx0, by0, bx1, by1 = block["spatial_coordinates"]
-                if by0 >= fy1:  # Below figure
+                if by0 >= fy1:  # Below figure/table
                     distance = by0 - fy1
                     if distance < min_distance and distance < 150:
                         min_distance = distance
@@ -126,7 +126,7 @@ class DocumentPipeline:
 
     @classmethod
     def interactive_run(cls):
-        """Scans the `pdf/` folder, lets the user select a target, extracts layout boxes via LayoutCropper, and executes the pipeline."""
+        """Scans the `pdf/` folder, lets the user select a target, extracts filtered layout boxes via LayoutCropper, and executes the pipeline."""
         print("\n========================================")
         print("     MASTER REFORMATTING & PARSING      ")
         print("========================================")
@@ -213,10 +213,10 @@ class DocumentPipeline:
 
         pipeline = cls(output_dir=out_dir)
         
-        # Extract layout boxes automatically via the LayoutCropper module if a source PDF exists
+        # Extract layout and table boxes automatically via the LayoutCropper module if a source PDF exists
         page_layouts = {}
         if target_pdf_path:
-            print(f"[*] Extracting layout figure boundaries via LayoutCropper...")
+            print(f"[*] Extracting layout figure & table boundaries via LayoutCropper...")
             page_layouts = pipeline.cropper.extract_layout_boxes(target_pdf_path)
 
         # Run text extraction, figure cropping, and analysis with progress bar
