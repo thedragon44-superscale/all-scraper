@@ -14,8 +14,8 @@ from utils.history import load_url_history, save_url_to_history
 from utils.clean_dirs import clean_empty_directories
 from utils.reset_system import reset_system
 from utils.stitch_pdf import stitch_images_to_pdf
-from utils.document_processor import process_pdf_to_structured_data
 from utils import URLUtils
+from extract_parse import ExtractParseEngine
 
 
 PROFILE_CHOICES = [
@@ -118,6 +118,64 @@ def run_scraper_flow(
         print("----------------------------------------\n")
 
 
+def handle_master_reformatting():
+    """Handles option 4 for master reformatting using ExtractParseEngine with figure cropping."""
+    print("\n========================================")
+    print("     MASTER REFORMATTING & PARSING      ")
+    print("========================================")
+    
+    # Target directory where page images (e.g., page_001.png) are stored
+    images_dir_input = input("Enter path to page images directory (e.g., data/parsed_data/emv1-2/images): ").strip()
+    if not images_dir_input:
+        print("[!] No directory provided.")
+        return
+        
+    images_dir = Path(images_dir_input)
+    if not images_dir.exists() or not images_dir.is_dir():
+        print(f"[!] Directory not found: {images_dir}")
+        return
+
+    page_images = sorted(list(images_dir.glob("page_*.png")))
+    if not page_images:
+        print(f"[!] No page images matching 'page_*.png' found in {images_dir}")
+        return
+
+    doc_name = input("Enter document name slug (default: 'document'): ").strip() or "document"
+    output_dir_input = input("Enter output directory for structured schema and cropped figures (default: 'data/output'): ").strip() or "data/output"
+    output_dir = Path(output_dir_input)
+    
+    print(f"\n[*] Processing {len(page_images)} pages for document '{doc_name}'...")
+    print(f"[*] Cropped figures will be saved to: {output_dir / 'cropped_figures'}")
+
+    try:
+        engine = ExtractParseEngine()
+        
+        # Optional: You can pass custom layout boxes per page index if available, e.g. {1: [(x0, y0, x1, y1), ...]}
+        # If not supplied, standard OCR text extraction and semantic analysis run across all pages.
+        result = engine.process_pages(
+            image_paths=page_images,
+            document_name=doc_name,
+            image_output_dir=output_dir / "cropped_figures",
+            page_layouts=None 
+        )
+        
+        # Save structured JSON schema output
+        output_json_path = output_dir / f"{doc_name}_schema.json"
+        output_json_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        import json
+        with open(output_json_path, "w", encoding="utf-8") as f:
+            json.dump(result["structured_schema"], f, indent=2, ensure_ascii=False)
+            
+        print(f"\n[Success] Master reformatting completed successfully!")
+        print(f"[+] Validated JSON Schema saved to: {output_json_path}")
+        print(f"[+] Extracted full text accumulator length: {len(result['full_text'])} characters")
+
+    except Exception as e:
+        print(f"\n[!] ERROR in Master Reformatting Pipeline: {type(e).__name__} - {e}")
+        traceback.print_exc()
+
+
 def interactive_menu():
     """Presents an interactive menu hub as the default entry point."""
     while True:
@@ -159,35 +217,7 @@ def interactive_menu():
                 traceback.print_exc()
 
         elif choice == "4":
-            print("\n[*] Running Advanced Document Reformatting & Parsing Pipeline...")
-            pdf_root = Path("pdf")
-            if not pdf_root.exists():
-                print("[!] Root 'pdf/' directory not found.")
-            else:
-                subdirs = sorted([d for d in pdf_root.iterdir() if d.is_dir() and not d.name.startswith('.')])
-                pdfs = sorted(list(pdf_root.glob("*.pdf")))
-                all_targets = subdirs + pdfs
-                
-                if not all_targets:
-                    print("[!] No folders or PDF files available in root 'pdf/' directory.")
-                else:
-                    print("\n========================================")
-                    print("     SELECT FOLDER OR PDF TO PARSE      ")
-                    print("========================================")
-                    for idx, t in enumerate(all_targets, 1):
-                        t_type = "Folder" if t.is_dir() else "PDF"
-                        print(f"  [{idx}] {t.name} ({t_type})")
-                    print("----------------------------------------")
-                    try:
-                        p_choice = input("Select number: ").strip()
-                        if p_choice.isdigit() and 1 <= int(p_choice) <= len(all_targets):
-                            selected_target = all_targets[int(p_choice) - 1]
-                            process_pdf_to_structured_data(str(selected_target))
-                        else:
-                            print("[!] Invalid selection.")
-                    except Exception as e:
-                        print(f"\n[!] ERROR in Document Reformatting: {type(e).__name__} - {e}")
-                        traceback.print_exc()
+            handle_master_reformatting()
             
         elif choice == "5":
             print("\n[*] Running local storage diagnostics verifier...")
@@ -250,7 +280,7 @@ def main():
     parser.add_argument("--parse-images", action="store_true", help="Run asset harvesting on local HTML files")
     parser.add_argument("--base-url", type=str, default="", help="Base URL for resolving relative asset links")
     parser.add_argument("--stitch-pdf", action="store_true", help="Stitch downloaded page tiles into a master PDF")
-    parser.add_argument("--reformat-pdf", type=str, default=None, help="Path to master PDF for structured reformatting")
+    parser.add_argument("--reformat-pdf", type=str, default=None, help="Path to master PDF or image directory for structured reformatting")
     parser.add_argument("--verify", action="store_true", help="Run local storage and file diagnostics")
     parser.add_argument("--reset-system", action="store_true", help="Wipe local data and asset directories")
     parser.add_argument("--clean-dirs", action="store_true", help="Prune empty nested skeleton directories")
@@ -275,7 +305,14 @@ def main():
     elif args.stitch_pdf:
         stitch_images_to_pdf()
     elif args.reformat_pdf:
-        process_pdf_to_structured_data(args.reformat_pdf)
+        target_path = Path(args.reformat_pdf)
+        if target_path.is_dir():
+            page_images = sorted(list(target_path.glob("page_*.png")))
+            engine = ExtractParseEngine()
+            result = engine.process_pages(page_images, document_name=target_path.name, image_output_dir=target_path / "cropped_figures")
+            print(f"[Success] Processed {len(page_images)} pages from CLI.")
+        else:
+            print("[!] Please provide a valid directory containing page images for CLI reformatting.")
     elif args.verify:
         run_verification()
     elif args.reset_system:
