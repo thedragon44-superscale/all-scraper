@@ -22,7 +22,7 @@ except ImportError:
 class LayoutCropper:
 
     # --- Tunable extraction constants ---
-    MIN_FRAGMENT_DIM = 2          # Raw-path floor: drops only invisible dots/hairlines
+    MIN_FRAGMENT_DIM = 2          # Raw-path floor: drops only specs where BOTH dimensions are microscopic
     MIN_REGION_SIZE = 40          # Post-cluster minimum width/height (pt) for tables/figures
     MAX_REGION_AREA_RATIO = 0.75  # Post-cluster max area as fraction of the page
     FULL_PAGE_WRAPPER_RATIO = 0.95  # Raw-level guard: length/area ratios that indicate full-page wrappers
@@ -124,17 +124,9 @@ class LayoutCropper:
         """Detects and extracts filtered layout bounding boxes (raster images and
         vector-drawn tables) from a source PDF.
 
-        Raw fragments (grid lines, strokes) are collected permissively and only
-        clustered afterward — the shape/size gate is applied POST-merge so table
-        fragments survive to become part of a unified region.
-
-        Args:
-            pdf_path: Path to the source PDF file.
-
-        Returns:
-            A dictionary mapping 1-indexed page numbers to lists of bounding box
-            tuples (x0, y0, x1, y1) expressed in the pixel space of the rendered
-            page images (i.e. PDF points multiplied by ``self.scale_factor``).
+        Raw fragments (grid lines, strokes) are collected permissively using an
+        AND-based size check so that hairline horizontal/vertical rules survive
+        to be clustered into tables.
         """
         page_layouts: Dict[int, List[Tuple[int, int, int, int]]] = {}
         if not PYMUPDF_AVAILABLE:
@@ -162,7 +154,7 @@ class LayoutCropper:
                     page_area = page_rect.width * page_rect.height
                     raw_rects: List[Tuple[int, int, int, int]] = []
 
-                    # 1. Collect embedded raster images (permissive: minimal filtering)
+                    # 1. Collect embedded raster images
                     try:
                         images = page.get_images(full=True)
                         for img_info in images:
@@ -175,7 +167,6 @@ class LayoutCropper:
                                 r_width = r.x1 - r.x0
                                 r_height = r.y1 - r.y0
 
-                                # Drop only full-page wrappers and tiny thumbnails
                                 if self._is_full_page_wrapper(r_width, r_height, r_width * r_height, page_rect):
                                     continue
                                 if r_width < self.MIN_IMAGE_BOX_DIM or r_height < self.MIN_IMAGE_BOX_DIM:
@@ -195,12 +186,14 @@ class LayoutCropper:
                             r_width = r.x1 - r.x0
                             r_height = r.y1 - r.y0
 
-                            # Permissive raw floor: keep hairline fragments so the
-                            # clustering stage can reconstruct tables from them.
-                            if r_width < self.MIN_FRAGMENT_DIM or r_height < self.MIN_FRAGMENT_DIM:
+                            # FIXED: Use AND instead of OR so long horizontal/vertical
+                            # hairlines aren't mistakenly dropped by their thin dimension.
+                            if r_width < self.MIN_FRAGMENT_DIM and r_height < self.MIN_FRAGMENT_DIM:
                                 continue
-                            # Guard only against literal full-page backgrounds
-                            if r_width > self.FULL_PAGE_WRAPPER_RATIO * page_rect.width and                                r_height > self.FULL_PAGE_WRAPPER_RATio * page_rect.height:
+
+                            # Guard against literal full-page backgrounds
+                            if r_width > self.FULL_PAGE_WRAPPER_RATIO * page_rect.width and \
+                               r_height > self.FULL_PAGE_WRAPPER_RATIO * page_rect.height:
                                 continue
 
                             raw_rects.append((int(r.x0), int(r.y0), int(r.x1), int(r.y1)))
@@ -210,14 +203,12 @@ class LayoutCropper:
                     # 3. Cluster fragments into unified table/figure regions
                     merged_boxes = self._merge_overlapping_boxes(raw_rects, threshold=self.MERGE_THRESHOLD)
 
-                    # 4. POST-cluster gate: apply shape/size qualification here,
-                    #    not on the raw fragments.
+                    # 4. POST-cluster gate
                     qualified = [
                         b for b in merged_boxes if self._qualifies_as_region(b, page_area)
                     ]
 
                     if qualified:
-                        # Convert PDF-point coords to rendered-image pixel coords
                         scaled = [
                             tuple(int(round(v * self.scale_factor)) for v in b)
                             for b in qualified
@@ -287,7 +278,7 @@ class LayoutCropper:
             try:
                 file_data = self.crop_region(
                     image_path=image_path,
-                bbox=bbox,
+                    bbox=bbox,
                     page_number=page_number,
                     figure_index=idx,
                 )
