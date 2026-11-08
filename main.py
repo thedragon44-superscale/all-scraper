@@ -159,26 +159,30 @@ def interactive_menu():
                 traceback.print_exc()
 
         elif choice == "4":
-            print("\n[*] Running Document Reformatting & Parsing Utility...")
-            pdf_dir = DATA_DIR / "pdf"
-            if not pdf_dir.exists():
-                print("[!] No PDFs found in data/pdf/. Stitch a PDF first.")
+            print("\n[*] Running Advanced Document Reformatting & Parsing Pipeline...")
+            pdf_root = Path("pdf")
+            if not pdf_root.exists():
+                print("[!] Root 'pdf/' directory not found.")
             else:
-                pdfs = list(pdf_dir.glob("*.pdf"))
-                if not pdfs:
-                    print("[!] No PDF files available in data/pdf/.")
+                subdirs = sorted([d for d in pdf_root.iterdir() if d.is_dir() and not d.name.startswith('.')])
+                pdfs = sorted(list(pdf_root.glob("*.pdf")))
+                all_targets = subdirs + pdfs
+                
+                if not all_targets:
+                    print("[!] No folders or PDF files available in root 'pdf/' directory.")
                 else:
                     print("\n========================================")
-                    print("         SELECT PDF TO REFORMAT         ")
+                    print("     SELECT FOLDER OR PDF TO PARSE      ")
                     print("========================================")
-                    for idx, p in enumerate(pdfs, 1):
-                        print(f"  [{idx}] {p.name}")
+                    for idx, t in enumerate(all_targets, 1):
+                        t_type = "Folder" if t.is_dir() else "PDF"
+                        print(f"  [{idx}] {t.name} ({t_type})")
                     print("----------------------------------------")
                     try:
-                        p_choice = input("Select PDF number: ").strip()
-                        if p_choice.isdigit() and 1 <= int(p_choice) <= len(pdfs):
-                            selected_pdf = pdfs[int(p_choice) - 1]
-                            process_pdf_to_structured_data(str(selected_pdf))
+                        p_choice = input("Select number: ").strip()
+                        if p_choice.isdigit() and 1 <= int(p_choice) <= len(all_targets):
+                            selected_target = all_targets[int(p_choice) - 1]
+                            process_pdf_to_structured_data(str(selected_target))
                         else:
                             print("[!] Invalid selection.")
                     except Exception as e:

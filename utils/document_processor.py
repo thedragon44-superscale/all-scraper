@@ -1,129 +1,125 @@
 import os
 import json
-import re
 from pathlib import Path
+from parser.extract_parse.ocr_engine import OCREngine
+from parser.extract_parse.text_analyzer import TextAnalyzer
+from parser.extract_parse.schema_mapper import SchemaMapper
+from parser.extract_parse.layout_cropper import LayoutCropper
+
 try:
     import fitz  # PyMuPDF
     PYMUPDF_AVAILABLE = True
 except ImportError:
     PYMUPDF_AVAILABLE = False
 
-def process_pdf_to_structured_data(pdf_path: str):
+def process_pdf_to_structured_data(target_path: str):
     """
-    Processes a master PDF into:
-      1. A unified text file (.txt)
-      2. Extracted image assets (.png)
-      3. A granular hierarchical JSON breakdown (Page -> Sentence -> Word)
-      Stored inside data/parsed_data/<custom_folder_name>/
+    Processes a selected folder (e.g., pdf/emv_book2 containing pre-extracted page images) 
+    or a master PDF file using the advanced OCR, Layout, NLP, and Schema Mapping pipeline.
     """
-    if not PYMUPDF_AVAILABLE:
-        print("[!] PyMuPDF is required for advanced text and image parsing. Run: pip install PyMuPDF")
+    target = Path(target_path)
+    if not target.exists():
+        print(f"[!] Target path not found: {target_path}")
         return
 
-    pdf_file = Path(pdf_path)
-    if not pdf_file.exists():
-        print(f"[!] PDF file not found: {pdf_path}")
-        return
-
-    default_name = pdf_file.stem
+    folder_name = target.stem if target.is_file() else target.name
     
-    # Prompt for custom output folder name
+    # Prompt for custom output folder name override
     try:
-        custom_name = input(f"Enter custom folder name for parsed output [default: {default_name}]: ").strip()
-        if not custom_name:
-            folder_name = default_name
-        else:
+        custom_name = input(f"Enter custom folder name for parsed output [default: {folder_name}]: ").strip()
+        if custom_name:
             folder_name = custom_name
     except (EOFError, KeyboardInterrupt):
         print("\n[*] Operation cancelled.")
         return
 
-    # Base path locked to data/parsed_data/
     out_dir = Path("data") / "parsed_data" / folder_name
     img_dir = out_dir / "images"
     text_dir = out_dir / "text"
     
-    img_dir.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
     text_dir.mkdir(parents=True, exist_ok=True)
+    img_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"[*] Processing document '{default_name}' into '{out_dir.resolve()}'...")
+    print(f"[*] Initializing advanced pipeline for '{folder_name}' -> Output: {out_dir.resolve()}")
 
-    doc = fitz.open(str(pdf_file))
-    
-    full_text_accumulator = []
-    structured_data = {
-        "document_name": default_name,
-        "total_pages": len(doc),
-        "pages": []
-    }
-    
-    total_images_extracted = 0
+    ocr_engine = OCREngine()
+    text_analyzer = TextAnalyzer()
+    cropper = LayoutCropper(img_dir)
 
-    for page_idx, page in enumerate(doc, 1):
-        page_data = {
-            "page_number": page_idx,
-            "sentences": []
-        }
+    page_images = []
+
+    if target.is_dir():
+        # Gather pre-existing page images from directory (e.g., PNGs, JPEGs)
+        image_extensions = {".png", ".jpg", ".jpeg", ".webp"}
+        page_images = sorted([p for p in target.iterdir() if p.suffix.lower() in image_extensions])
         
-        # 1. Extract Page Text
-        page_text = page.get_text("text")
+        if not page_images:
+            # Check if directory contains a PDF file inside
+            sub_pdfs = list(target.glob("*.pdf"))
+            if sub_pdfs and PYMUPDF_AVAILABLE:
+                print(f"[*] Found PDF inside directory, rendering pages to images...")
+                doc = fitz.open(str(sub_pdfs[0]))
+                for idx, page in enumerate(doc, 1):
+                    pix = page.get_pixmap()
+                    img_path = img_dir / f"page_{idx:03d}.png"
+                    pix.save(str(img_path))
+                    page_images.append(img_path)
+    elif target.is_file() and target.suffix.lower() == ".pdf" and PYMUPDF_AVAILABLE:
+        print(f"[*] Rendering PDF pages to images for advanced parsing...")
+        doc = fitz.open(str(target))
+        for idx, page in enumerate(doc, 1):
+            pix = page.get_pixmap()
+            img_path = img_dir / f"page_{idx:03d}.png"
+            pix.save(str(img_path))
+            page_images.append(img_path)
+
+    total_pages = len(page_images)
+    if total_pages == 0:
+        print(f"[!] No valid page images or documents found in {target_path}")
+        return
+
+    schema_mapper = SchemaMapper(document_name=folder_name, total_pages=total_pages)
+    full_text_accumulator = []
+
+    for page_idx, img_path in enumerate(page_images, 1):
+        print(f"[*] Processing page {page_idx}/{total_pages} via OCR & NLP...")
+        
+        # 1. OCR Data extraction (bounding boxes, text blocks, confidence)
+        try:
+            ocr_result = ocr_engine.extract_page_data(img_path)
+            dimensions = ocr_result["page_dimensions"]
+            text_blocks = ocr_result["text_blocks"]
+        except Exception as e:
+            print(f"    [!] OCR Error on page {page_idx}: {e}")
+            dimensions = {"width": 1280, "height": 1024}
+            text_blocks = []
+
+        # Compile page text for raw text output
+        page_text = " ".join([b["text_content"] for b in text_blocks])
         full_text_accumulator.append(f"--- PAGE {page_idx} ---\n{page_text}")
 
-        # Clean and split text into sentences using basic regex boundary rules
-        raw_sentences = re.split(r'(?<=[.!?])\s+', page_text.strip())
-        
-        sentence_id = 1
-        for sent in raw_sentences:
-            clean_sent = sent.replace("\n", " ").strip()
-            if not clean_sent:
-                continue
-                
-            # Break sentence down word-by-word
-            raw_words = re.findall(r'\b\w+\b', clean_sent)
-            
-            sentence_obj = {
-                "sentence_id": sentence_id,
-                "text": clean_sent,
-                "word_count": len(raw_words),
-                "words": [{"position": w_idx, "word": w} for w_idx, w in enumerate(raw_words, 1)]
-            }
-            page_data["sentences"].append(sentence_obj)
-            sentence_id += 1
+        # 2. Semantic NLP analysis (topics, key concepts, entities, summaries, intent)
+        analysis_meta = text_analyzer.analyze_page(text_blocks)
 
-        structured_data["pages"].append(page_data)
+        # 3. Add to Schema Mapper
+        schema_mapper.add_page_data(
+            page_number=page_idx,
+            page_dimensions=dimensions,
+            text_blocks=text_blocks,
+            figure_blocks=[],  
+            analysis_metadata=analysis_meta
+        )
 
-        # 2. Extract Embedded Images / Page Visuals
-        image_list = page.get_images(full=True)
-        for img_index, img in enumerate(image_list, 1):
-            xref = img[0]
-            base_image = doc.extract_image(xref)
-            image_bytes = base_image["image"]
-            image_ext = base_image["ext"]
-            
-            image_filename = f"page_{page_idx:03d}_img_{img_index:02d}.png"
-            image_path = img_dir / image_filename
-            
-            # Save image cleanly as PNG
-            if image_ext != "png":
-                from PIL import Image
-                import io
-                image = Image.open(io.BytesIO(image_bytes))
-                image.save(str(image_path), "PNG")
-            else:
-                image_path.write_bytes(image_bytes)
-                
-            total_images_extracted += 1
-
-    # Write Unified Text Document
+    # Save Unified Text Document
     txt_output_path = text_dir / f"{folder_name}_full.txt"
     txt_output_path.write_text("\n\n".join(full_text_accumulator), encoding="utf-8")
 
-    # Write Granular Structural JSON Breakdown
+    # Save Validated Structured JSON Schema
     json_output_path = out_dir / f"{folder_name}_structured.json"
-    json_output_path.write_text(json.dumps(structured_data, indent=2, ensure_ascii=False), encoding="utf-8")
+    schema_mapper.save_json(json_output_path)
 
-    print(f"\n[+] Reformatting Complete!")
+    print(f"\n[+] Advanced Pipeline Complete!")
     print(f"    - Output Directory:      {out_dir.resolve()}")
     print(f"    - Unified Text Output:   {txt_output_path.name}")
-    print(f"    - Extracted Images:      images/ ({total_images_extracted} files)")
     print(f"    - Structured JSON Map:   {json_output_path.name}")
