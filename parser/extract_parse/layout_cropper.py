@@ -2,6 +2,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 from PIL import Image
 
+try:
+    import fitz  # PyMuPDF
+    PYMUPDF_AVAILABLE = True
+except ImportError:
+    PYMUPDF_AVAILABLE = False
+
 
 class LayoutCropper:
 
@@ -13,6 +19,40 @@ class LayoutCropper:
         """
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    def extract_layout_boxes(
+        self, pdf_path: str | Path
+    ) -> Dict[int, List[Tuple[int, int, int, int]]]:
+        """Detects and extracts embedded image bounding box coordinates from a source PDF document.
+
+        Args:
+            pdf_path: Path to the source PDF file.
+
+        Returns:
+            A dictionary mapping 1-indexed page numbers to lists of bounding box tuples (x0, y0, x1, y1).
+        """
+        page_layouts: Dict[int, List[Tuple[int, int, int, int]]] = {}
+        if not PYMUPDF_AVAILABLE:
+            return page_layouts
+
+        path = Path(pdf_path)
+        if not path.exists():
+            return page_layouts
+
+        try:
+            doc = fitz.open(str(path))
+            for idx, page in enumerate(doc, 1):
+                rects = []
+                for img_info in page.get_images(full=True):
+                    xref = img_info[0]
+                    for r in page.get_image_rects(xref):
+                        rects.append((int(r.x0), int(r.y0), int(r.x1), int(r.y1)))
+                if rects:
+                    page_layouts[idx] = rects
+        except Exception:
+            pass
+
+        return page_layouts
 
     def crop_region(
         self,

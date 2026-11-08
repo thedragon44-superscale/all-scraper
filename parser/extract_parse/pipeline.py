@@ -126,7 +126,7 @@ class DocumentPipeline:
 
     @classmethod
     def interactive_run(cls):
-        """Scans the `pdf/` folder, lets the user select a target, customize the output folder name, renders/gathers images, and executes the pipeline."""
+        """Scans the `pdf/` folder, lets the user select a target, extracts layout boxes via LayoutCropper, and executes the pipeline."""
         print("\n========================================")
         print("     MASTER REFORMATTING & PARSING      ")
         print("========================================")
@@ -173,6 +173,7 @@ class DocumentPipeline:
         img_dir.mkdir(parents=True, exist_ok=True)
 
         page_images = []
+        target_pdf_path = None
 
         if selected_target.is_dir():
             image_extensions = {".png", ".jpg", ".jpeg", ".webp"}
@@ -181,24 +182,27 @@ class DocumentPipeline:
             if not page_images and (selected_target / "images").exists():
                 page_images = sorted([p for p in (selected_target / "images").iterdir() if p.suffix.lower() in image_extensions])
 
-            if not page_images:
-                sub_pdfs = list(selected_target.glob("*.pdf"))
-                if sub_pdfs and PYMUPDF_AVAILABLE:
+            sub_pdfs = list(selected_target.glob("*.pdf"))
+            if sub_pdfs:
+                target_pdf_path = sub_pdfs[0]
+                if not page_images and PYMUPDF_AVAILABLE:
                     print(f"[*] Found PDF inside directory, rendering pages to images...")
-                    doc = fitz.open(str(sub_pdfs[0]))
+                    doc = fitz.open(str(target_pdf_path))
                     for idx, page in enumerate(doc, 1):
                         pix = page.get_pixmap()
                         img_path = img_dir / f"page_{idx:03d}.png"
                         pix.save(str(img_path))
                         page_images.append(img_path)
-        elif selected_target.is_file() and selected_target.suffix.lower() == ".pdf" and PYMUPDF_AVAILABLE:
-            print(f"[*] Rendering PDF pages to images...")
-            doc = fitz.open(str(selected_target))
-            for idx, page in enumerate(doc, 1):
-                pix = page.get_pixmap()
-                img_path = img_dir / f"page_{idx:03d}.png"
-                pix.save(str(img_path))
-                page_images.append(img_path)
+        elif selected_target.is_file() and selected_target.suffix.lower() == ".pdf":
+            target_pdf_path = selected_target
+            if PYMUPDF_AVAILABLE:
+                print(f"[*] Rendering PDF pages to images...")
+                doc = fitz.open(str(target_pdf_path))
+                for idx, page in enumerate(doc, 1):
+                    pix = page.get_pixmap()
+                    img_path = img_dir / f"page_{idx:03d}.png"
+                    pix.save(str(img_path))
+                    page_images.append(img_path)
 
         if not page_images:
             print(f"[!] No valid page images or documents found for {selected_target.name}")
@@ -209,11 +213,17 @@ class DocumentPipeline:
 
         pipeline = cls(output_dir=out_dir)
         
+        # Extract layout boxes automatically via the LayoutCropper module if a source PDF exists
+        page_layouts = {}
+        if target_pdf_path:
+            print(f"[*] Extracting layout figure boundaries via LayoutCropper...")
+            page_layouts = pipeline.cropper.extract_layout_boxes(target_pdf_path)
+
         # Run text extraction, figure cropping, and analysis with progress bar
         schema_result = pipeline.process_document(
             document_name=default_folder_name,
             page_images=page_images,
-            page_layouts=None
+            page_layouts=page_layouts
         )
 
         # Build full text accumulator
