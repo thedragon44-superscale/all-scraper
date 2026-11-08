@@ -30,12 +30,44 @@ class LayoutCropper:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
+    def _merge_overlapping_boxes(
+        self, boxes: List[Tuple[int, int, int, int]], threshold: int = 20
+    ) -> List[Tuple[int, int, int, int]]:
+        """Clusters and merges overlapping or closely adjacent bounding boxes 
+
+        to reconstruct unified table and diagram regions.
+        """
+        if not boxes:
+            return []
+
+        sorted_boxes = sorted(boxes, key=lambda b: (b[1], b[0]))
+        merged = [sorted_boxes[0]]
+
+        for current in sorted_boxes[1:]:
+            prev = merged[-1]
+            px0, py0, px1, py1 = prev
+            cx0, cy0, cx1, cy1 = current
+
+            # Check for proximity or overlap
+            if (cx0 <= px1 + threshold and cx1 >= px0 - threshold and
+                cy0 <= py1 + threshold and cy1 >= py0 - threshold):
+                # Union the boxes
+                nx0 = min(px0, cx0)
+                ny0 = min(py0, cy0)
+                nx1 = max(px1, cx1)
+                ny1 = max(py1, cy1)
+                merged[-1] = (nx0, ny0, nx1, ny1)
+            else:
+                merged.append(current)
+
+        return merged
+
     def extract_layout_boxes(
         self, pdf_path: str | Path
     ) -> Dict[int, List[Tuple[int, int, int, int]]]:
-        """Detects and extracts filtered layout bounding boxes (images and vector-drawn tables) 
+        """Detects and extracts filtered layout bounding boxes (raster images and vector-drawn tables) 
 
-        from a source PDF document with comprehensive terminal progress tracking and stack trace logging.
+        from a source PDF document using path bounding boxes and spatial clustering.
 
         Args:
             pdf_path: Path to the source PDF file.
@@ -59,15 +91,14 @@ class LayoutCropper:
             doc = fitz.open(str(path))
             total_pages = len(doc)
 
-            # Wrap page iteration with a dedicated progress bar and diagnostics
             with tqdm(enumerate(doc, 1), total=total_pages, desc="Extracting Layouts", unit="page") as pbar:
                 for idx, page in pbar:
                     pbar.set_postfix(page=f"{idx}/{total_pages}")
-                    rects = []
+                    raw_rects = []
                     page_rect = page.rect
                     page_area = page_rect.width * page_rect.height
 
-                    # 1. Extract embedded raster images with explicit size/area rejection logging
+                    # 1. Extract embedded raster images with strict area and dimension filtering
                     try:
                         images = page.get_images(full=True)
                         for img_info in images:
@@ -78,52 +109,41 @@ class LayoutCropper:
                                 box_area = box_width * box_height
 
                                 if box_area > 0.75 * page_area or box_width > 0.95 * page_rect.width or box_height > 0.95 * page_rect.height:
-                                    logger.debug(f"[Page {idx}] Discarded raster image (full-page wrapper): area={box_area:.1f}, dims=({box_width:.1f}x{box_height:.1f})")
+                                    logger.debug(f"[Page {idx}] Discarded raster image (full-page wrapper): area={box_area:.1f}")
                                     continue
-                                if box_width < 20 or box_height < 20:
-                                    logger.debug(f"[Page {idx}] Discarded raster image (too small/noise): dims=({box_width:.1f}x{box_height:.1f})")
+                                if box_width < 25 or box_height < 25:
                                     continue
 
-                                rects.append((int(r.x0), int(r.y0), int(r.x1), int(r.y1)))
+                                raw_rects.append((int(r.x0), int(r.y0), int(r.x1), int(r.y1)))
                     except Exception as e:
                         logger.warning(f"[Page {idx}] Failed to extract raster images: {e}")
 
-                    # 2. Extract vector drawings to detect tables and structured bounding boxes
-                    table_rects = []
+                    # 2. Extract vector drawing paths using native path bounding boxes (`item["rect"]`)
                     try:
                         drawings = page.get_drawings()
                         for item in drawings:
-                            if item.get("items"):
-                                for sub in item["items"]:
-                                    if sub[0] == "re":  # Rectangle path
-                                        rx0, ry0, rx1, ry1 = sub[1]
-                                        r_width = rx1 - rx0
-                                        r_height = ry1 - ry0
-                                        r_area = r_width * r_height
-                                        if 0.01 * page_area < r_area < 0.7 * page_area:
-                                            table_rects.append((int(rx0), int(ry0), int(rx1), int(ry1)))
+                            r = item.get("rect")
+                            if r:
+                                r_width = r.x1 - r.x0
+                                r_height = r.y1 - r.y0
+                                r_area = r_width * r_height
+
+                                # Filter out full-page background boxes and microscopic line artifacts
+                                if r_area > 0.75 * page_area or r_width > 0.95 * page_rect.width or r_height > 0.95 * page_rect.height:
+                                    continue
+                                if r_width < 30 or r_height < 15:
+                                    continue
+
+                                raw_rects.append((int(r.x0), int(r.y0), int(r.x1), int(r.y1)))
                     except Exception as e:
                         logger.warning(f"[Page {idx}] Failed to extract vector drawings: {e}")
 
-                    # Combine, deduplicate, and sort boxes by vertical position
-                    combined_boxes = []
-                    all_raw_rects = rects + table_rects
-                    all_raw_rects.sort(key=lambda b: (b[1], b[0]))
+                    # 3. Cluster and merge overlapping or adjacent component boxes into clean tables/figures
+                    merged_boxes = self._merge_overlapping_boxes(raw_rects, threshold=20)
 
-                    for box in all_raw_rects:
-                        is_duplicate = False
-                        bx0, by0, bx1, by1 = box
-                        for existing in combined_boxes:
-                            ex0, ey0, ex1, ey1 = existing
-                            if abs(bx0 - ex0) < 10 and abs(by0 - ey0) < 10 and abs(bx1 - ex1) < 10 and abs(by1 - ey1) < 10:
-                                is_duplicate = True
-                                break
-                        if not is_duplicate:
-                            combined_boxes.append(box)
-
-                    if combined_boxes:
-                        page_layouts[idx] = combined_boxes
-                        logger.info(f"[Page {idx}] Accepted {len(combined_boxes)} layout/table bounding boxes.")
+                    if merged_boxes:
+                        page_layouts[idx] = merged_boxes
+                        logger.info(f"[Page {idx}] Accepted {len(merged_boxes)} layout/table bounding boxes.")
 
             logger.info(f"Successfully completed layout extraction across {len(page_layouts)} pages.")
         except Exception:
@@ -150,8 +170,8 @@ class LayoutCropper:
         width, height = image.size
         x0 = max(0, min(x0, width))
         y0 = max(0, min(y0, height))
-        x1 = max(x0, min(x1, width))
-        y1 = max(y0, min(y1, height))
+        x1 = max(0, min(x1, width))
+        y1 = max(0, min(y1, height))
 
         if x0 >= x1 or y0 >= y1:
             logger.warning(f"Invalid bounding box dimensions for page {page_number}, figure {figure_index}: {bbox}")
