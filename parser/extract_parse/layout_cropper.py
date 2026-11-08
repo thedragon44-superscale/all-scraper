@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 import logging
 from PIL import Image
 from tqdm import tqdm
@@ -28,7 +28,6 @@ class LayoutCropper:
     FULL_PAGE_WRAPPER_RATIO = 0.95  # Raw-level guard: length/area ratios that indicate full-page wrappers
     MERGE_THRESHOLD = 20          # Clustering proximity gap (pt)
     MIN_IMAGE_BOX_DIM = 25        # Smallest embedded raster worth considering (pt)
-    TEXT_CHARS_SCANNED_PAGE = 20  # Below this char count a page is treated as scanned
 
     def __init__(self, output_dir: str | Path, scale_factor: float = 1.0):
         """Initializes the layout cropper.
@@ -89,35 +88,6 @@ class LayoutCropper:
             current = merged
 
         return current
-
-    def _is_scanned_page(self, page: "fitz.Page") -> bool:
-        """Heuristic: a page with little/no text and a single large raster is a scan."""
-        try:
-            text_chars = len(page.get_text().strip())
-        except Exception:
-            text_chars = 0
-
-        if text_chars >= self.TEXT_CHARS_SCANNED_PAGE:
-            return False
-
-        try:
-            images = page.get_images(full=True)
-        except Exception:
-            return False
-
-        if len(images) != 1:
-            return False
-
-        page_area = page.rect.width * page.rect.height
-        try:
-            rects = page.get_image_rects(images[0][0])
-        except Exception:
-            return False
-
-        for r in rects:
-            if (r.x1 - r.x0) * (r.y1 - r.y0) >= 0.9 * page_area:
-                return True
-        return False
 
     def _is_full_page_wrapper(
         self, r_width: float, r_height: float, r_area: float, page_rect: "fitz.Rect"
@@ -181,20 +151,12 @@ class LayoutCropper:
         try:
             doc = fitz.open(str(path))
             total_pages = len(doc)
-            scanned_pages = 0
 
             with tqdm(
                 enumerate(doc, 1), total=total_pages, desc="Extracting Layouts", unit="page"
             ) as pbar:
                 for idx, page in pbar:
                     pbar.set_postfix(page=f"{idx}/{total_pages}")
-
-                    # Skip scanned pages: the whole page is one raster, so there
-                    # is nothing meaningful to crop beyond the scan itself.
-                    if self._is_scanned_page(page):
-                        scanned_pages += 1
-                        logger.debug(f"[Page {idx}] Skipped (scanned/image-only page).")
-                        continue
 
                     page_rect = page.rect
                     page_area = page_rect.width * page_rect.height
@@ -238,8 +200,7 @@ class LayoutCropper:
                             if r_width < self.MIN_FRAGMENT_DIM or r_height < self.MIN_FRAGMENT_DIM:
                                 continue
                             # Guard only against literal full-page backgrounds
-                            if r_width > self.FULL_PAGE_WRAPPER_RATIO * page_rect.width and \
-                               r_height > self.FULL_PAGE_WRAPPER_RATIO * page_rect.height:
+                            if r_width > self.FULL_PAGE_WRAPPER_RATIO * page_rect.width and                                r_height > self.FULL_PAGE_WRAPPER_RATio * page_rect.height:
                                 continue
 
                             raw_rects.append((int(r.x0), int(r.y0), int(r.x1), int(r.y1)))
@@ -265,8 +226,7 @@ class LayoutCropper:
                         logger.info(f"[Page {idx}] Accepted {len(scaled)} layout/table bounding boxes.")
 
             logger.info(
-                f"Layout extraction complete: {len(page_layouts)} pages with regions, "
-                f"{scanned_pages} scanned pages skipped."
+                f"Layout extraction complete: {len(page_layouts)} pages with regions."
             )
         except Exception:
             logger.exception("Critical error during layout box extraction process.")
@@ -325,15 +285,14 @@ class LayoutCropper:
         extracted_figures = []
         for idx, bbox in enumerate(layout_boxes, start=1):
             try:
-                figure_data = self.crop_region(
+                file_data = self.crop_region(
                     image_path=image_path,
-                    bbox=bbox,
+                bbox=bbox,
                     page_number=page_number,
                     figure_index=idx,
                 )
-                extracted_figures.append(figure_data)
+                extracted_figures.append(file_data)
             except Exception as e:
                 logger.warning(f"Failed to crop region {bbox} on page {page_number}: {e}")
 
         return extracted_figures
-
