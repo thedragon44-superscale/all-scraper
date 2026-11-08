@@ -18,21 +18,31 @@ try:
 except ImportError:
     PYMUPDF_AVAILABLE = False
 
+try:
+    import cv2
+    import numpy as np
+    OPENCV_AVAILABLE = True
+except ImportError:
+    OPENCV_AVAILABLE = False
+
+try:
+    import pytesseract
+    PYTESSERACT_AVAILABLE = True
+except ImportError:
+    PYTESSERACT_AVAILABLE = False
+
 
 class LayoutCropper:
 
     # --- Tunable extraction constants ---
-    MIN_FRAGMENT_DIM = 2          
-    MIN_REGION_WIDTH = 30         
-    MIN_REGION_HEIGHT = 15        
-    MIN_REGION_AREA = 600         
-    MAX_REGION_AREA_RATIO = 0.85  
-    FULL_PAGE_WRAPPER_RATIO = 0.98  # Raised guard to catch near-full-page screenshot wrappers
-    MERGE_THRESHOLD = 20          
-    MIN_IMAGE_BOX_DIM = 25        
+    MIN_REGION_WIDTH = 40         
+    MIN_REGION_HEIGHT = 20        
+    MIN_REGION_AREA = 800         
+    MAX_REGION_AREA_RATIO = 0.90  
+    MERGE_THRESHOLD = 30          
 
     def __init__(self, output_dir: str | Path, scale_factor: float = 1.0):
-        """Initializes the layout cropper.
+        """Initializes the layout cropper for raster screenshot-stitched PDFs.
 
         Args:
             output_dir: Directory where cropped figure assets will be saved.
@@ -59,7 +69,7 @@ class LayoutCropper:
         return (min(a[0], b[0]), min(a[1], b[1]), max(a[2], b[2]), max(a[3], b[3]))
 
     def _merge_overlapping_boxes(
-        self, boxes: List[Tuple[int, int, int, int]], threshold: int = 20
+        self, boxes: List[Tuple[int, int, int, int]], threshold: int = 30
     ) -> List[Tuple[int, int, int, int]]:
         if not boxes:
             return []
@@ -79,16 +89,6 @@ class LayoutCropper:
 
         return current
 
-    def _is_full_page_wrapper(
-        self, r_width: float, r_height: float, r_area: float, page_rect: "fitz.Rect"
-    ) -> bool:
-        page_area = page_rect.width * page_rect.height
-        return (
-            r_area > self.FULL_PAGE_WRAPPER_RATIO * page_area
-            or r_width > self.FULL_PAGE_WRAPPER_RATIO * page_rect.width
-            or r_height > self.FULL_PAGE_WRAPPER_RATIO * page_rect.height
-        )
-
     def _qualifies_as_region(
         self, box: Tuple[int, int, int, int], page_area: float
     ) -> bool:
@@ -102,11 +102,104 @@ class LayoutCropper:
             return False
         return True
 
+    def _detect_opencv_grid_and_blocks(
+        self, page: "fitz.Page", page_rect: "fitz.Rect"
+    ) -> List[Tuple[int, int, int, int]]:
+        """Approach 1: OpenCV morphological gridline extraction and contour-based 
+        visual block detection on page bitmap snapshots.
+        """
+        boxes: List[Tuple[int, int, int, int]] = []
+        if not OPENCV_AVAILABLE:
+            return boxes
+
+        try:
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+            img_data = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
+            
+            if pix.n == 4:
+                gray = cv2.cvtColor(img_data, cv2.COLOR_BGRA2GRAY)
+            elif pix.n == 3:
+                gray = cv2.cvtColor(img_data, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = img_data
+
+            _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY_INV)
+
+            # Table Gridline Extraction
+            h_kernel_len = max(1, thresh.shape[1] // 30)
+            v_kernel_len = max(1, thresh.shape[0] // 30)
+            h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (h_kernel_len, 1))
+            v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, v_kernel_len))
+
+            h_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, h_kernel)
+            v_lines = cv2.morphologyEx(thresh, cv2.MORPH_OPEN, v_kernel)
+            table_grid = cv2.add(h_lines, v_lines)
+
+            contours, _ = cv2.findContours(table_grid, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            inv_scale = 0.5
+
+            for cnt in contours:
+                x, y, w, h = cv2.boundingRect(cnt)
+                boxes.append((int(x * inv_scale), int(y * inv_scale), int((x + w) * inv_scale), int((y + h) * inv_scale)))
+
+            # Visual Content Blocks (Diagrams / Illustrations)
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))
+            dilated = cv2.dilate(thresh, kernel, iterations=2)
+            fig_contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            for cnt in fig_contours:
+                x, y, w, h = cv2.boundingRect(cnt)
+                if w * h < 3000 or w > page_rect.width * 0.95 or h > page_rect.height * 0.95:
+                    continue
+                boxes.append((int(x * inv_scale), int(y * inv_scale), int((x + w) * inv_scale), int((y + h) * inv_scale)))
+
+        except Exception as e:
+            logger.warning(f"OpenCV grid/block detection failed: {e}")
+
+        return boxes
+
+    def _detect_ocr_anchored_regions(
+        self, page: "fitz.Page", page_rect: "fitz.Rect"
+    ) -> List[Tuple[int, int, int, int]]:
+        """Approach 2: OCR-driven keyword anchoring. Scans page text for caption 
+        markers ('figure', 'table', 'fig.') and defines asset bounding boxes above them.
+        """
+        boxes: List[Tuple[int, int, int, int]] = []
+        if not PYTESSERACT_AVAILABLE:
+            return boxes
+
+        try:
+            pix = page.get_pixmap(matrix=fitz.Matrix(1, 1))
+            img = Image.frombytes("RGB", [pix.w, pix.h], pix.samples)
+            
+            ocr_data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+            n_boxes = len(ocr_data["text"])
+            
+            for i in range(n_boxes):
+                text = ocr_data["text"][i].strip().lower()
+                if any(kw in text for kw in ["fig", "figure", "table", "diagram", "chart", "illustration"]):
+                    x0 = ocr_data["left"][i]
+                    y0 = ocr_data["top"][i]
+                    w = ocr_data["width"][i]
+                    
+                    # Define an anchor box directly above the caption label
+                    box_x0 = max(10, x0 - 40)
+                    box_x1 = min(int(page_rect.width) - 10, x0 + w + 200)
+                    box_y1 = y0 - 10
+                    box_y0 = max(10, box_y1 - 250)  # Estimated figure/table height window above caption
+                    
+                    if box_y1 > box_y0:
+                        boxes.append((box_x0, box_y0, box_x1, box_y1))
+        except Exception as e:
+            logger.warning(f"OCR keyword anchoring failed: {e}")
+
+        return boxes
+
     def extract_layout_boxes(
         self, pdf_path: str | Path
     ) -> Dict[int, List[Tuple[int, int, int, int]]]:
-        """Detects layout bounding boxes, supporting both vector specs and 
-        screenshot-stitched raster documents where pages are full-page background images.
+        """Extracts table and figure bounding boxes using pure raster processing:
+        combining OpenCV grid/contour detection and OCR-driven keyword anchoring.
         """
         page_layouts: Dict[int, List[Tuple[int, int, int, int]]] = {}
         if not PYMUPDF_AVAILABLE:
@@ -118,7 +211,7 @@ class LayoutCropper:
             logger.error(f"Source PDF not found: {path}")
             return page_layouts
 
-        logger.info(f"Starting layout and table extraction for screenshot-stitched PDF: {path.name}")
+        logger.info(f"Starting raster hybrid extraction (OpenCV + OCR Anchoring) for: {path.name}")
 
         try:
             doc = fitz.open(str(path))
@@ -134,61 +227,18 @@ class LayoutCropper:
                     page_area = page_rect.width * page_rect.height
                     raw_rects: List[Tuple[int, int, int, int]] = []
 
-                    # 1. Collect embedded raster images (Handles full-page screenshot wrappers)
-                    try:
-                        images = page.get_images(full=True)
-                        for img_info in images:
-                            xref = img_info[0]
-                            try:
-                                rects = page.get_image_rects(xref)
-                            except Exception:
-                                continue
-                            for r in rects:
-                                r_width = r.x1 - r.x0
-                                r_height = r.y1 - r.y0
-                                r_area = r_width * r_height
+                    # 1. OpenCV Grid and Visual Block Detection
+                    cv_rects = self._detect_opencv_grid_and_blocks(page, page_rect)
+                    raw_rects.extend(cv_rects)
 
-                                # For screenshot-stitched docs, if an image covers most of the page,
-                                # we treat it as the background canvas rather than discarding potential sub-figures,
-                                # or we inspect its internal layout if needed. Here we keep sub-images or non-full-page rasters.
-                                if self._is_full_page_wrapper(r_width, r_height, r_area, page_rect):
-                                    continue
-                                if r_width < self.MIN_IMAGE_BOX_DIM or r_height < self.MIN_IMAGE_BOX_DIM:
-                                    continue
+                    # 2. OCR-Driven Keyword Anchoring
+                    ocr_rects = self._detect_ocr_anchored_regions(page, page_rect)
+                    raw_rects.extend(ocr_rects)
 
-                                raw_rects.append((int(r.x0), int(r.y0), int(r.x1), int(r.y1)))
-                    except Exception as e:
-                        logger.warning(f"[Page {idx}] Failed to extract raster images: {e}")
-
-                    # 2. Collect vector drawing fragments
-                    try:
-                        drawings = page.get_drawings()
-                        for item in drawings:
-                            r = item.get("rect")
-                            if r:
-                                r_width = r.x1 - r.x0
-                                r_height = r.y1 - r.y0
-                                if not (r_width < self.MIN_FRAGMENT_DIM and r_height < self.MIN_FRAGMENT_DIM):
-                                    if not (r_width > self.FULL_PAGE_WRAPPER_RATIO * page_rect.width and r_height > self.FULL_PAGE_WRAPPER_RATIO * page_rect.height):
-                                        raw_rects.append((int(r.x0), int(r.y0), int(r.x1), int(r.y1)))
-
-                            for sub in item.get("items", []):
-                                if sub[0] == "re":
-                                    rx0, ry0, rx1, ry1 = sub[1]
-                                    raw_rects.append((int(rx0), int(ry0), int(rx1), int(ry1)))
-                                elif sub[0] == "l":
-                                    p1, p2 = sub[1], sub[2]
-                                    lx0, ly0 = min(p1.x, p2.x), min(p1.y, p2.y)
-                                    lx1, ly1 = max(p1.x, p2.x), max(p1.y, p2.y)
-                                    raw_rects.append((int(lx0), int(ly0), int(lx1), int(ly1)))
-
-                    except Exception as e:
-                        logger.warning(f"[Page {idx}] Failed to extract vector drawings: {e}")
-
-                    # 3. Cluster fragments
+                    # 3. Cluster and merge all detected regions
                     merged_boxes = self._merge_overlapping_boxes(raw_rects, threshold=self.MERGE_THRESHOLD)
 
-                    # 4. POST-cluster gate
+                    # 4. Post-cluster validation gate
                     qualified = [
                         b for b in merged_boxes if self._qualifies_as_region(b, page_area)
                     ]
