@@ -5,6 +5,7 @@ from .ocr_engine import OCREngine
 from .text_analyzer import TextAnalyzer
 from .schema_mapper import SchemaMapper, DocumentSchemaModel
 from .layout_cropper import LayoutCropper
+from .pipeline import DocumentPipeline
 
 
 class ExtractParseEngine:
@@ -107,4 +108,5 @@ __all__ = [
     "TextAnalyzer",
     "SchemaMapper",
     "LayoutCropper",
+    "DocumentPipeline",
 ]
